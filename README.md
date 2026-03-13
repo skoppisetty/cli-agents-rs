@@ -29,7 +29,8 @@ use std::sync::Arc;
 async fn main() {
     let opts = RunOptions {
         cli: Some(CliName::Claude),
-        task: "What is 2+2?".into(),
+        task: "List all public functions in src/lib.rs and describe what each one does.".into(),
+        cwd: Some("./my-project".into()),
         skip_permissions: true,
         ..Default::default()
     };
@@ -71,7 +72,8 @@ Omit `cli` to auto-discover the first available agent (Claude > Codex > Gemini):
 
 ```rust
 let opts = RunOptions {
-    task: "Explain this codebase".into(),
+    task: "Read the README and give a one-paragraph summary of this project.".into(),
+    cwd: Some("./my-project".into()),
     ..Default::default()
 };
 let handle = run(opts, None);
@@ -94,8 +96,9 @@ for (name, path) in &all {
 
 ```rust
 let opts = RunOptions {
-    task: "Review this PR".into(),
-    system_prompt: Some("You are a senior Rust reviewer.".into()),
+    task: "Read src/ and identify any potential security issues or panics.".into(),
+    cwd: Some("./my-project".into()),
+    system_prompt: Some("You are a senior Rust reviewer. Be concise.".into()),
     // Or from a file:
     // system_prompt_file: Some("./prompts/reviewer.md".into()),
     ..Default::default()
@@ -116,7 +119,7 @@ servers.insert("my-server".into(), McpServer {
 });
 
 let opts = RunOptions {
-    task: "Use the MCP tools".into(),
+    task: "List the 5 most recent open issues.".into(),
     mcp_servers: Some(servers),
     ..Default::default()
 };
@@ -126,7 +129,9 @@ let opts = RunOptions {
 
 ```rust
 let opts = RunOptions {
-    task: "Do something".into(),
+    task: "Run the test suite, fix any failures, and re-run until all tests pass.".into(),
+    cwd: Some("/home/user/my-app".into()),
+    skip_permissions: true,
     idle_timeout_ms: Some(60_000),          // 1 min idle timeout
     total_timeout_ms: Some(300_000),        // 5 min total timeout
     max_consecutive_tool_failures: Some(5), // Abort after 5 consecutive failures
@@ -147,7 +152,9 @@ By default, the library does **not** bypass CLI permission prompts. Set
 use cli_agents::{RunOptions, ProviderOptions, ClaudeOptions};
 
 let opts = RunOptions {
-    task: "Fix the bug".into(),
+    task: "Refactor the error handling in src/lib.rs to use thiserror.".into(),
+    cwd: Some("/home/user/my-app".into()),
+    skip_permissions: true,
     providers: Some(ProviderOptions {
         claude: Some(ClaudeOptions {
             max_turns: Some(10),
@@ -227,19 +234,24 @@ The crate includes an optional CLI binary behind the `cli` feature:
 ```bash
 cargo install cli-agents --features cli
 
-# Auto-discover and run
-cli-agents "What does this code do?"
+# Summarize a project (auto-discovers installed CLI)
+cli-agents --cwd ./my-project "Read the README and summarize this project."
 
-# Specify provider
-cli-agents --cli claude "Fix the tests"
+# Point at a codebase (auto-discovers CLI)
+cli-agents --cwd ./my-project "Find all TODO comments and list them."
 
-# Stream as JSON lines
-cli-agents --json "Explain main.rs"
+# Code review with a system prompt
+cli-agents --cli codex --cwd ./my-project \
+  --system "You are a senior code reviewer. Be concise." \
+  "Review src/lib.rs for potential bugs."
 
-# Verbose mode (show tools, thinking, stats)
-cli-agents -v "Refactor this function"
+# Stream events as JSON lines (useful for piping into other tools)
+cli-agents --json --cwd ./my-project "List all public structs in src/"
 
-# List available CLIs
+# Verbose mode with Gemini (show tool calls, thinking, and token stats)
+cli-agents --cli gemini -v --cwd ~/projects/my-app "What dependencies does this project have?"
+
+# List available CLIs on this system
 cli-agents --discover
 ```
 
