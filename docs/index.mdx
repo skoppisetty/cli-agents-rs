@@ -1,0 +1,63 @@
+---
+title: cli-agents
+description: Build agentic apps on top of your users' existing AI subscriptions
+generated: true
+---
+
+# cli-agents
+
+Build agentic apps on top of your users' existing AI subscriptions.
+
+Instead of requiring API keys or managing token costs, `cli-agents` spawns the AI CLI tools users already have installed — Claude Code, Codex, or Gemini CLI — and provides a unified Rust interface for streaming events, tool calls, cancellation, and structured results. Your app brings the UX; the user brings their own subscription.
+
+## Key features
+
+- **Single API** — `run()` works with any supported CLI backend
+- **Auto-discovery** — finds installed CLIs in PATH, nvm, homebrew, and common install locations
+- **Streaming events** — unified `StreamEvent` enum for text, thinking, tool calls, errors, and completion across all providers
+- **Timeouts & guardrails** — idle timeout, total timeout, and consecutive tool-failure limits with automatic cancellation
+- **MCP support** — configure Model Context Protocol servers for all adapters
+- **Async / Tokio** — fully async with cancellation via `CancellationToken`
+
+## Quick example
+
+```rust
+use cli_agents::{run, RunOptions, StreamEvent, CliName};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() {
+    let opts = RunOptions {
+        cli: Some(CliName::Claude),
+        task: "List all public functions in src/lib.rs".into(),
+        cwd: Some("./my-project".into()),
+        skip_permissions: true,
+        ..Default::default()
+    };
+
+    let handle = run(opts, Some(Arc::new(|event: StreamEvent| {
+        match &event {
+            StreamEvent::TextDelta { text } => print!("{text}"),
+            StreamEvent::Done { result } => println!("\nDone: {:?}", result.success),
+            _ => {}
+        }
+    })));
+
+    let result = handle.result.await.unwrap().unwrap();
+    println!("Success: {}", result.success);
+}
+```
+
+## Why cli-agents?
+
+AI APIs require API keys and charge per token. Most developers already pay for Claude Pro, ChatGPT Plus, or Gemini — and those subscriptions come with CLI tools. `cli-agents` lets you build desktop apps, dev tools, and automation that run on the user's existing subscription with zero API cost to you.
+
+This is especially powerful for **Tauri desktop apps**: your Rust backend spawns the agent, streams events to the frontend, and the user's own subscription handles the AI — no API keys to configure, no billing to manage.
+
+## Platform support
+
+| Platform | Status |
+|----------|--------|
+| macOS (ARM64, x64) | Fully tested end-to-end |
+| Linux (x64, ARM64) | Compiles and passes unit tests in CI |
+| Windows (x64) | Compiles and passes unit tests in CI — Unix-specific APIs need platform implementations |

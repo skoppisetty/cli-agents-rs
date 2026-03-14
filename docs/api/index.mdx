@@ -1,0 +1,44 @@
+---
+title: API Reference
+description: Complete API reference for the cli-agents Rust library
+generated: true
+---
+
+# API Reference
+
+The `cli-agents` crate exports a small, focused API. Everything you need is re-exported from the crate root.
+
+## Primary imports
+
+```rust
+use cli_agents::{
+    // Core function
+    run,
+    // Handle for the running agent
+    RunHandle,
+    // Configuration
+    RunOptions, CliName, McpServer, McpTransport,
+    ProviderOptions, ClaudeOptions, CodexOptions, GeminiOptions,
+    // Results
+    RunResult, RunStats,
+    // Events
+    StreamEvent, Severity,
+    // Errors
+    Error, Result,
+};
+```
+
+## Modules
+
+| Module | Description |
+|--------|-------------|
+| [`run`](./run) | The `run()` function, `RunHandle`, `RunResult`, and `RunStats` |
+| [`types`](./types) | `RunOptions`, `CliName`, `McpServer`, and provider-specific option structs |
+| [`events`](./events) | `StreamEvent` enum and `Severity` |
+| [`discovery`](./discovery) | Functions for finding installed CLI binaries |
+
+## Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `DEFAULT_MAX_OUTPUT_BYTES` | 10 MB | Default max stdout buffer size, shared across all adapters |

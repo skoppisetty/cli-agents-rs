@@ -1,0 +1,121 @@
+---
+title: Events & Errors
+description: StreamEvent enum, Severity, and the Error type
+generated: true
+---
+
+# Events & Errors
+
+## StreamEvent
+
+Unified stream event emitted by all adapters. Tagged enum serialized with a `type` discriminant in `snake_case`.
+
+```rust
+pub enum StreamEvent {
+    TextDelta { text: String },
+
+    ThinkingDelta { text: String },
+
+    ToolStart {
+        tool_name: String,
+        tool_id: String,
+        args: Option<HashMap<String, serde_json::Value>>,
+    },
+
+    ToolEnd {
+        tool_id: String,
+        success: bool,
+        output: Option<String>,
+        error: Option<String>,
+    },
+
+    TurnEnd,
+
+    Error {
+        message: String,
+        severity: Option<Severity>,
+    },
+
+    Done {
+        result: RunResult,
+    },
+
+    Raw {
+        provider: CliName,
+        event: serde_json::Value,
+    },
+}
+```
+
+### Variants
+
+#### `TextDelta`
+Incremental text output from the agent. Concatenate all deltas to build the full response.
+
+#### `ThinkingDelta`
+Reasoning/thinking output. Only emitted by providers that support extended thinking (Claude) or reasoning (Codex).
+
+#### `ToolStart`
+A tool call has started. `args` contains the parsed arguments as a JSON map, or `None` if no arguments were provided.
+
+#### `ToolEnd`
+A tool call has completed. Check `success` to determine the outcome. On failure, `error` contains the error message. On success, `output` contains the tool's output text.
+
+#### `TurnEnd`
+A full agent turn has completed. In multi-turn runs, you'll see multiple `TurnEnd` events.
+
+#### `Error`
+An error or warning from the adapter or the CLI process. Check `severity` to distinguish warnings from errors. This is also emitted when timeouts fire or the tool failure limit is reached.
+
+#### `Done`
+The run has completed. Always the last event emitted. Contains the final [`RunResult`](/api/run#runresult) with success status, output text, stats, and session ID.
+
+#### `Raw`
+Escape hatch for provider-specific events that don't map to the unified types. Contains the raw JSON and the provider name.
+
+### Serialization
+
+`StreamEvent` uses `#[serde(tag = "type", rename_all = "snake_case")]`, so JSON output looks like:
+
+```json
+{"type":"text_delta","text":"Hello"}
+{"type":"tool_start","toolName":"Read","toolId":"t1","args":{"file_path":"/tmp/test.rs"}}
+{"type":"done","result":{"success":true,"text":"..."}}
+```
+
+## Severity
+
+```rust
+pub enum Severity {
+    Warning,
+    Error,
+}
+```
+
+Serializes to lowercase: `"warning"`, `"error"`.
+
+## Error
+
+Errors returned by `cli-agents` operations.
+
+```rust
+pub enum Error {
+    NoCli,
+    CliRequiredWithExecutable,
+    Process(String),
+    Io(std::io::Error),
+    Json(serde_json::Error),
+    Other(String),
+}
+```
+
+| Variant | Message | When |
+|---------|---------|------|
+| `NoCli` | "no AI CLI found — install claude, codex, or gemini" | No CLI binary found during auto-discovery |
+| `CliRequiredWithExecutable` | "must specify `cli` when using `executable_path`" | `executable_path` set without `cli` |
+| `Process(msg)` | varies | CLI process failed to spawn or exceeded output limits |
+| `Io(err)` | varies | Filesystem or I/O error |
+| `Json(err)` | varies | JSON serialization/deserialization error |
+| `Other(msg)` | varies | Catch-all for other errors |
+
+The crate also exports `pub type Result<T> = std::result::Result<T, Error>;`.

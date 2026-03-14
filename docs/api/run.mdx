@@ -1,0 +1,143 @@
+---
+title: run
+description: The run() function, RunHandle, RunResult, and RunStats
+generated: true
+---
+
+# run
+
+## `run()`
+
+Launches an agent run. This is the main entry point for the library.
+
+```rust
+pub fn run(
+    opts: RunOptions,
+    on_event: Option<Arc<dyn Fn(StreamEvent) + Send + Sync>>,
+) -> RunHandle
+```
+
+**Parameters:**
+- `opts` — Configuration for the run. See [`RunOptions`](/api/types#runoptions).
+- `on_event` — Optional callback invoked for each streaming event. Called synchronously from the reader task, so keep it fast. The final `StreamEvent::Done` is always emitted.
+
+**Returns:** A [`RunHandle`](#runhandle) with the result future and cancellation token.
+
+**Behavior:**
+1. Resolves which CLI to use — either from `opts.cli` or via [auto-discovery](/api/discovery) (Claude → Codex → Gemini priority)
+2. Spawns the CLI subprocess with the appropriate adapter (Claude, Codex, or Gemini)
+3. Streams stdout line-by-line, parsing provider-specific JSON into unified [`StreamEvent`](/api/events) values
+4. Tracks idle timeout, total timeout, and consecutive tool failures
+5. On completion or cancellation, emits `StreamEvent::Done` and returns the [`RunResult`](#runresult)
+
+```rust
+use cli_agents::{run, RunOptions, StreamEvent};
+use std::sync::Arc;
+
+let opts = RunOptions {
+    task: "What is 2+2?".into(),
+    skip_permissions: true,
+    ..Default::default()
+};
+
+let handle = run(opts, Some(Arc::new(|event: StreamEvent| {
+    if let StreamEvent::TextDelta { text } = &event {
+        print!("{text}");
+    }
+})));
+
+let result = handle.result.await.unwrap().unwrap();
+```
+
+## RunHandle
+
+Returned by `run()`. Holds the async result and cancellation mechanism.
+
+```rust
+pub struct RunHandle {
+    pub result: tokio::task::JoinHandle<Result<RunResult>>,
+    pub cancel: CancellationToken,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `result` | `JoinHandle<Result<RunResult>>` | Awaitable future that resolves to the run result |
+| `cancel` | `CancellationToken` | Token to abort the run — triggers process group kill |
+
+### Methods
+
+#### `abort()`
+
+```rust
+pub fn abort(&self)
+```
+
+Cancels the running agent by triggering the cancellation token. The process group is killed and the result will have `success: false`.
+
+```rust
+let handle = run(opts, None);
+
+// Cancel after 30 seconds
+let cancel = handle.cancel.clone();
+tokio::spawn(async move {
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    cancel.cancel();
+});
+
+let result = handle.result.await.unwrap().unwrap();
+```
+
+## RunResult
+
+The outcome of a completed run.
+
+```rust
+pub struct RunResult {
+    pub success: bool,
+    pub text: Option<String>,
+    pub exit_code: Option<i32>,
+    pub stats: Option<RunStats>,
+    pub session_id: Option<String>,
+    pub stderr: Option<String>,
+    pub cost_usd: Option<f64>,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `bool` | Whether the run completed successfully |
+| `text` | `Option<String>` | Final text output from the agent |
+| `exit_code` | `Option<i32>` | CLI process exit code |
+| `stats` | `Option<RunStats>` | Token usage and timing statistics |
+| `session_id` | `Option<String>` | Session ID for resuming the conversation later |
+| `stderr` | `Option<String>` | Captured stderr from the CLI process |
+| `cost_usd` | `Option<f64>` | Estimated cost in USD (Claude only) |
+
+`RunResult` implements `Serialize` and `Deserialize` with `camelCase` field names, making it easy to pass to frontends.
+
+## RunStats
+
+Token usage and timing statistics from the run.
+
+```rust
+pub struct RunStats {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub tool_calls: Option<u32>,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `input_tokens` | `Option<u64>` | Number of input tokens consumed |
+| `output_tokens` | `Option<u64>` | Number of output tokens generated |
+| `total_tokens` | `Option<u64>` | Total tokens (Gemini) |
+| `cached_tokens` | `Option<u64>` | Tokens served from cache |
+| `duration_ms` | `Option<u64>` | Wall-clock duration of the run |
+| `tool_calls` | `Option<u32>` | Number of tool calls made |
+
+Not all providers report all fields. Check for `None` before using.

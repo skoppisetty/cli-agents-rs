@@ -1,0 +1,189 @@
+---
+title: Types
+description: RunOptions, CliName, McpServer, and provider-specific option structs
+generated: true
+---
+
+# Types
+
+All types are re-exported from the crate root and implement `Serialize`/`Deserialize` for easy JSON interop.
+
+## CliName
+
+Enum of supported CLI agents.
+
+```rust
+pub enum CliName {
+    Claude,
+    Codex,
+    Gemini,
+}
+```
+
+Serializes to lowercase strings: `"claude"`, `"codex"`, `"gemini"`. Implements `Display` with the same output.
+
+## RunOptions
+
+Configuration for a single `run()` call. All fields except `task` are optional.
+
+```rust
+pub struct RunOptions {
+    pub cli: Option<CliName>,
+    pub task: String,
+    pub system_prompt: Option<String>,
+    pub system_prompt_file: Option<String>,
+    pub mcp_servers: Option<HashMap<String, McpServer>>,
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+    pub idle_timeout_ms: Option<u64>,
+    pub total_timeout_ms: Option<u64>,
+    pub max_consecutive_tool_failures: Option<u32>,
+    pub env: Option<HashMap<String, String>>,
+    pub executable_path: Option<String>,
+    pub resume_session_id: Option<String>,
+    pub max_output_bytes: Option<usize>,
+    pub skip_permissions: bool,
+    pub providers: Option<ProviderOptions>,
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `cli` | `None` (auto-discover) | Which CLI to use |
+| `task` | required | The prompt/task to send to the agent |
+| `system_prompt` | `None` | Inline system prompt |
+| `system_prompt_file` | `None` | Path to a system prompt file (takes precedence over `system_prompt`) |
+| `mcp_servers` | `None` | MCP servers to connect |
+| `cwd` | `"."` | Working directory for the CLI process |
+| `model` | `None` | Model name (e.g. `"sonnet"`, `"o3"`, `"gemini-2.0-flash"`) |
+| `idle_timeout_ms` | 300,000 | Idle timeout in milliseconds |
+| `total_timeout_ms` | `None` | Total timeout in milliseconds |
+| `max_consecutive_tool_failures` | 3 | Max consecutive tool failures before aborting |
+| `env` | `None` | Extra environment variables for the CLI process |
+| `executable_path` | `None` | Explicit path to the CLI binary (skips discovery — requires `cli` to be set) |
+| `resume_session_id` | `None` | Session ID to resume a previous conversation |
+| `max_output_bytes` | 10 MB | Max stdout buffer before aborting |
+| `skip_permissions` | `false` | Bypass CLI permission prompts |
+| `providers` | `None` | Provider-specific options |
+
+Serializes with `camelCase` field names and implements `Default`.
+
+## McpServer
+
+Configuration for an MCP (Model Context Protocol) server.
+
+```rust
+pub struct McpServer {
+    // Stdio transport
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub env: Option<HashMap<String, String>>,
+    pub cwd: Option<String>,
+
+    // HTTP/SSE transport
+    pub url: Option<String>,
+    pub transport_type: Option<McpTransport>,
+    pub headers: Option<HashMap<String, String>>,
+
+    // Tool filtering
+    pub include_tools: Option<Vec<String>>,
+    pub exclude_tools: Option<Vec<String>>,
+
+    // Timeouts
+    pub timeout: Option<u64>,
+}
+```
+
+Use either stdio fields (`command`, `args`) or HTTP/SSE fields (`url`, `transport_type`), not both.
+
+## McpTransport
+
+```rust
+pub enum McpTransport {
+    Stdio,
+    Sse,
+    Http,
+}
+```
+
+## ProviderOptions
+
+Container for provider-specific option structs:
+
+```rust
+pub struct ProviderOptions {
+    pub claude: Option<ClaudeOptions>,
+    pub codex: Option<CodexOptions>,
+    pub gemini: Option<GeminiOptions>,
+}
+```
+
+Only the options matching the active CLI are used. You can safely set options for all providers.
+
+## ClaudeOptions
+
+```rust
+pub struct ClaudeOptions {
+    pub allowed_tools: Option<String>,
+    pub disallowed_tools: Option<String>,
+    pub tools: Option<String>,
+    pub append_system_prompt: Option<String>,
+    pub max_turns: Option<u32>,
+    pub max_budget_usd: Option<f64>,
+    pub max_thinking_tokens: Option<u32>,
+    pub continue_session: Option<bool>,
+    pub include_partial_messages: Option<bool>,
+    pub effort: Option<String>,
+    pub agents: Option<serde_json::Value>,
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `allowed_tools` | Comma-separated list of allowed tools |
+| `disallowed_tools` | Comma-separated list of disallowed tools |
+| `tools` | Comma-separated list of tools to make available |
+| `append_system_prompt` | Text appended to the system prompt |
+| `max_turns` | Maximum number of agent turns |
+| `max_budget_usd` | Spending limit in USD |
+| `max_thinking_tokens` | Cap on thinking/reasoning tokens |
+| `continue_session` | Continue the last session |
+| `include_partial_messages` | Include partial messages in streaming |
+| `effort` | Effort level (`"low"`, `"medium"`, `"high"`) |
+| `agents` | Agent configuration as JSON |
+
+## CodexOptions
+
+```rust
+pub struct CodexOptions {
+    pub approval_policy: Option<String>,
+    pub sandbox_mode: Option<String>,
+    pub additional_directories: Option<Vec<String>>,
+    pub images: Option<Vec<String>>,
+    pub output_schema: Option<String>,
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `approval_policy` | `"full-auto"`, `"suggest"`, or `"auto-edit"` |
+| `sandbox_mode` | Sandbox mode (e.g. `"workspace-write"`) |
+| `additional_directories` | Extra directories Codex can access |
+| `images` | Image file paths to include |
+| `output_schema` | JSON schema for structured output |
+
+## GeminiOptions
+
+```rust
+pub struct GeminiOptions {
+    pub approval_mode: Option<String>,
+    pub sandbox: Option<bool>,
+    pub extra_args: Option<Vec<String>>,
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `approval_mode` | Approval mode (e.g. `"auto"`) |
+| `sandbox` | Enable sandbox mode |
+| `extra_args` | Additional CLI arguments passed directly to the Gemini binary |

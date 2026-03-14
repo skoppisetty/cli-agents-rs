@@ -1,3 +1,7 @@
 /target
 Cargo.lock
 .DS_Store
+
+# autodocs build cache
+.autodocs/
+.vercel

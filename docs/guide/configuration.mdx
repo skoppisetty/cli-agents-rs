@@ -1,0 +1,231 @@
+---
+title: Configuration
+description: System prompts, MCP servers, timeouts, permissions, and provider-specific options
+generated: true
+---
+
+# Configuration
+
+All configuration is passed through [`RunOptions`](/api/types#runoptions). This page covers the most common configuration patterns.
+
+## System prompts
+
+Set a system prompt inline or from a file. When both are provided, `system_prompt_file` takes precedence.
+
+```rust
+let opts = RunOptions {
+    task: "Review src/lib.rs for potential bugs.".into(),
+    system_prompt: Some("You are a senior Rust reviewer. Be concise.".into()),
+    ..Default::default()
+};
+```
+
+```rust
+let opts = RunOptions {
+    task: "Review the codebase.".into(),
+    system_prompt_file: Some("./prompts/reviewer.md".into()),
+    ..Default::default()
+};
+```
+
+Each adapter handles system prompts differently under the hood:
+- **Claude** — passed via `--system-prompt` or `--system-prompt-file` flags
+- **Codex** — written to a temporary `config.toml` as the `instructions` field
+- **Gemini** — written to a temporary file and referenced via `GEMINI_SYSTEM_MD` env var
+
+## MCP servers
+
+Configure [Model Context Protocol](https://modelcontextprotocol.io/) servers that the agent can use as tools:
+
+```rust
+use cli_agents::{McpServer, RunOptions};
+use std::collections::HashMap;
+
+let mut servers = HashMap::new();
+servers.insert("my-server".into(), McpServer {
+    command: Some("npx".into()),
+    args: Some(vec!["-y".into(), "my-mcp-server".into()]),
+    ..Default::default()
+});
+
+let opts = RunOptions {
+    task: "List the 5 most recent open issues.".into(),
+    mcp_servers: Some(servers),
+    ..Default::default()
+};
+```
+
+### Stdio transport
+
+```rust
+McpServer {
+    command: Some("npx".into()),
+    args: Some(vec!["-y".into(), "@modelcontextprotocol/server-github".into()]),
+    env: Some(HashMap::from([("GITHUB_TOKEN".into(), token)])),
+    ..Default::default()
+}
+```
+
+### HTTP/SSE transport
+
+```rust
+McpServer {
+    url: Some("https://my-server.example.com/mcp".into()),
+    transport_type: Some(McpTransport::Sse),
+    headers: Some(HashMap::from([("Authorization".into(), "Bearer ...".into())])),
+    ..Default::default()
+}
+```
+
+### Tool filtering
+
+Restrict which tools the agent can use from an MCP server:
+
+```rust
+McpServer {
+    command: Some("my-server".into()),
+    include_tools: Some(vec!["search".into(), "read".into()]),
+    exclude_tools: Some(vec!["delete".into()]),
+    ..Default::default()
+}
+```
+
+## Timeouts and safety
+
+```rust
+let opts = RunOptions {
+    task: "Fix failing tests and re-run until green.".into(),
+    idle_timeout_ms: Some(60_000),          // 1 min idle timeout
+    total_timeout_ms: Some(300_000),        // 5 min total timeout
+    max_consecutive_tool_failures: Some(5), // abort after 5 consecutive failures
+    ..Default::default()
+};
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `idle_timeout_ms` | 300,000 (5 min) | Time without any event before the run is cancelled |
+| `total_timeout_ms` | None (unlimited) | Absolute time limit for the entire run |
+| `max_consecutive_tool_failures` | 3 | Number of consecutive tool failures before aborting |
+| `max_output_bytes` | 10 MB | Max stdout buffer size — prevents OOM from runaway output |
+
+When a timeout fires or the failure limit is reached, the cancellation token is triggered and the process group is killed.
+
+## Permission bypass
+
+By default, CLI permission prompts are **not** bypassed. Set `skip_permissions: true` to run in fully autonomous mode:
+
+```rust
+let opts = RunOptions {
+    task: "Refactor the error handling.".into(),
+    skip_permissions: true,
+    ..Default::default()
+};
+```
+
+This passes provider-specific flags:
+- **Claude** — `--dangerously-skip-permissions` + `--permission-mode bypassPermissions`
+- **Codex** — `--dangerously-bypass-approvals-and-sandbox`
+- **Gemini** — `--yolo`
+
+> ⚠️ **Use with caution** — the agent will execute tools without human confirmation.
+
+## Provider-specific options
+
+Pass options that only apply to a specific CLI backend via `providers`:
+
+### Claude
+
+```rust
+use cli_agents::{RunOptions, ProviderOptions, ClaudeOptions};
+
+let opts = RunOptions {
+    task: "Refactor error handling.".into(),
+    providers: Some(ProviderOptions {
+        claude: Some(ClaudeOptions {
+            max_turns: Some(10),
+            max_thinking_tokens: Some(8000),
+            max_budget_usd: Some(1.50),
+            effort: Some("low".into()),
+            allowed_tools: Some("Bash,Read".into()),
+            continue_session: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }),
+    ..Default::default()
+};
+```
+
+See [`ClaudeOptions`](/api/types#claudeoptions) for all fields.
+
+### Codex
+
+```rust
+use cli_agents::{RunOptions, ProviderOptions, CodexOptions};
+
+let opts = RunOptions {
+    task: "Fix the bug.".into(),
+    providers: Some(ProviderOptions {
+        codex: Some(CodexOptions {
+            approval_policy: Some("full-auto".into()),
+            sandbox_mode: Some("workspace-write".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }),
+    ..Default::default()
+};
+```
+
+See [`CodexOptions`](/api/types#codexoptions) for all fields.
+
+### Gemini
+
+```rust
+use cli_agents::{RunOptions, ProviderOptions, GeminiOptions};
+
+let opts = RunOptions {
+    task: "Explain the architecture.".into(),
+    providers: Some(ProviderOptions {
+        gemini: Some(GeminiOptions {
+            sandbox: Some(true),
+            approval_mode: Some("auto".into()),
+            extra_args: Some(vec!["--verbose".into()]),
+        }),
+        ..Default::default()
+    }),
+    ..Default::default()
+};
+```
+
+See [`GeminiOptions`](/api/types#geminioptions) for all fields.
+
+## Environment variables
+
+Pass extra environment variables to the CLI subprocess:
+
+```rust
+let opts = RunOptions {
+    task: "Check the API.".into(),
+    env: Some(HashMap::from([
+        ("MY_API_KEY".into(), "sk-...".into()),
+    ])),
+    ..Default::default()
+};
+```
+
+## Session resumption
+
+Resume a previous conversation by passing the session ID from a prior run:
+
+```rust
+let opts = RunOptions {
+    task: "Continue where we left off.".into(),
+    cli: Some(CliName::Claude),
+    resume_session_id: Some(previous_result.session_id.unwrap()),
+    ..Default::default()
+};
+```
+
+The session ID is returned in [`RunResult.session_id`](/api/run#runresult).

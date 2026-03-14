@@ -1,0 +1,139 @@
+---
+title: Streaming Events
+description: Handling real-time streaming events from agent runs
+generated: true
+---
+
+# Streaming Events
+
+Every agent run emits a stream of [`StreamEvent`](/api/events) values through the callback you pass to `run()`. All three providers (Claude, Codex, Gemini) are normalized into the same event types.
+
+## Handling events
+
+```rust
+use cli_agents::{run, RunOptions, StreamEvent};
+use std::sync::Arc;
+
+let opts = RunOptions {
+    task: "Explain this codebase.".into(),
+    ..Default::default()
+};
+
+let handle = run(opts, Some(Arc::new(|event: StreamEvent| {
+    match &event {
+        StreamEvent::TextDelta { text } => {
+            print!("{text}");
+        }
+        StreamEvent::ThinkingDelta { text } => {
+            eprint!("[thinking] {text}");
+        }
+        StreamEvent::ToolStart { tool_name, tool_id, args } => {
+            eprintln!("▶ Tool started: {tool_name} ({tool_id})");
+        }
+        StreamEvent::ToolEnd { tool_id, success, output, error } => {
+            if *success {
+                eprintln!("✓ Tool {tool_id} succeeded");
+            } else {
+                eprintln!("✗ Tool {tool_id} failed: {}", error.as_deref().unwrap_or("unknown"));
+            }
+        }
+        StreamEvent::TurnEnd => {
+            eprintln!("--- turn complete ---");
+        }
+        StreamEvent::Error { message, severity } => {
+            eprintln!("Error ({severity:?}): {message}");
+        }
+        StreamEvent::Done { result } => {
+            println!("\nSuccess: {}", result.success);
+            if let Some(stats) = &result.stats {
+                println!("Tokens: in={:?} out={:?}", stats.input_tokens, stats.output_tokens);
+            }
+        }
+        StreamEvent::Raw { provider, event } => {
+            // Provider-specific events not covered by the unified types
+        }
+    }
+})));
+```
+
+## Event types
+
+| Variant | When it fires |
+|---------|---------------|
+| `TextDelta` | Incremental text output from the agent |
+| `ThinkingDelta` | Reasoning/thinking output (Claude extended thinking, Codex reasoning) |
+| `ToolStart` | A tool call has started — includes tool name, ID, and parsed arguments |
+| `ToolEnd` | A tool call has completed — includes success status, output, and error |
+| `TurnEnd` | A full agent turn has completed |
+| `Error` | An error or warning — check `severity` for `Warning` vs `Error` |
+| `Done` | Run completed — contains the final [`RunResult`](/api/run#runresult) |
+| `Raw` | Escape hatch for provider-specific events not mapped to the unified types |
+
+## Event flow
+
+A typical run produces events in this order:
+
+```
+TextDelta("I'll read the file.")
+ToolStart { tool_name: "Read", tool_id: "t1", ... }
+ToolEnd { tool_id: "t1", success: true, ... }
+TextDelta("The file contains...")
+TurnEnd
+Done { result: RunResult { success: true, ... } }
+```
+
+Multi-turn runs repeat the TextDelta → Tool → TurnEnd cycle multiple times before the final `Done`.
+
+## JSON streaming (CLI)
+
+When using the CLI binary, pass `--json` to get every event as a JSON line on stdout:
+
+```bash
+cli-agents --json --cwd ./my-project "List all public structs"
+```
+
+Each line is a serialized `StreamEvent` with a `type` discriminant:
+
+```json
+{"type":"text_delta","text":"Here are the public structs:"}
+{"type":"tool_start","toolName":"Bash","toolId":"t1","args":{"command":"grep -r 'pub struct'"}}
+{"type":"tool_end","toolId":"t1","success":true,"output":"..."}
+{"type":"done","result":{"success":true,"text":"..."}}
+```
+
+This is useful for piping into other tools or building custom frontends.
+
+## CLI binary usage
+
+```bash
+# Auto-discover CLI and run a task
+cli-agents --cwd ./my-project "Summarize this project"
+
+# Specify a provider
+cli-agents --cli claude --cwd ./my-project "Find all TODO comments"
+
+# With a system prompt
+cli-agents --cli codex --cwd ./my-project \
+  --system "You are a senior code reviewer." \
+  "Review src/lib.rs for potential bugs."
+
+# Verbose mode (show tool calls, thinking, and token stats)
+cli-agents --cli gemini -v --cwd ~/projects/my-app "What dependencies does this project have?"
+
+# List available CLIs
+cli-agents --discover
+```
+
+### CLI flags
+
+| Flag | Description |
+|------|-------------|
+| `--cli <name>` | Which CLI to use (`claude`, `codex`, `gemini`) — auto-discovers if omitted |
+| `--model <name>` | Model name (e.g. `sonnet`, `opus`, `o3`) |
+| `--system <prompt>` | System prompt |
+| `--append-system-prompt <text>` | Append to the system prompt |
+| `--cwd <path>` | Working directory |
+| `--skip-permissions` | Run without permission prompts |
+| `--json` | Print all events as JSON lines |
+| `-v, --verbose` | Show tool calls, thinking, and token stats |
+| `--discover` | List available CLIs and exit |

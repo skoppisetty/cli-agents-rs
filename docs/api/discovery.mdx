@@ -1,0 +1,84 @@
+---
+title: Discovery
+description: Functions for finding installed CLI binaries
+generated: true
+---
+
+# Discovery
+
+The `cli_agents::discovery` module finds CLI binaries on the system. Results are cached process-wide for subsequent calls.
+
+## Functions
+
+### `discover_binary()`
+
+```rust
+pub async fn discover_binary(cli: CliName) -> Option<String>
+```
+
+Discover a specific CLI binary. Returns the absolute path if found, `None` otherwise. Results are cached.
+
+```rust
+use cli_agents::discovery::discover_binary;
+use cli_agents::CliName;
+
+if let Some(path) = discover_binary(CliName::Claude).await {
+    println!("Claude found at: {path}");
+}
+```
+
+### `discover_all()`
+
+```rust
+pub async fn discover_all() -> Vec<(CliName, String)>
+```
+
+Discover all available CLI binaries concurrently. Returns a list of `(name, path)` pairs.
+
+```rust
+use cli_agents::discovery::discover_all;
+
+let all = discover_all().await;
+for (name, path) in &all {
+    println!("{name}: {path}");
+}
+// Output:
+// claude: /usr/local/bin/claude
+// gemini: /opt/homebrew/bin/gemini
+```
+
+### `discover_first()`
+
+```rust
+pub async fn discover_first() -> Option<(CliName, String)>
+```
+
+Discover the first available CLI binary. Priority order: Claude → Codex → Gemini. All lookups run concurrently and the highest-priority match is returned.
+
+This is what `run()` uses internally when `opts.cli` is `None`.
+
+```rust
+use cli_agents::discovery::discover_first;
+
+if let Some((name, path)) = discover_first().await {
+    println!("Using {name} at {path}");
+}
+```
+
+### `clear_cache()`
+
+```rust
+pub fn clear_cache()
+```
+
+Clear the binary discovery cache. Useful if a CLI was installed or removed after the initial discovery.
+
+## Search locations
+
+Discovery checks the following locations in order:
+
+1. **`which`** — standard PATH lookup
+2. **NVM paths** — `$NVM_BIN` and `~/.nvm/versions/node/*/bin/` (newest version first)
+3. **Common install directories** — `/opt/homebrew/bin`, `/usr/local/bin`
+4. **Home-relative paths** — `~/.local/bin`, `~/.bun/bin`, `~/.npm-global/bin`
+5. **CLI-specific paths** — `~/.claude/local/claude` (Claude only)

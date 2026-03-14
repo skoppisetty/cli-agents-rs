@@ -1,0 +1,127 @@
+---
+title: Getting Started
+description: Installation, prerequisites, and basic usage of cli-agents
+generated: true
+---
+
+# Getting Started
+
+## Prerequisites
+
+You need at least one supported AI CLI installed on the system where your app runs:
+
+| CLI | Install |
+|-----|---------|
+| Claude Code | `npm install -g @anthropic-ai/claude-code` |
+| Codex | `npm install -g @openai/codex` |
+| Gemini CLI | `npm install -g @google/gemini-cli` |
+
+## Installation
+
+### As a Rust library
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+cli-agents = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+```
+
+### As a CLI tool
+
+```bash
+# Via npm (recommended — prebuilt binaries, no Rust toolchain needed)
+npm install -g @cueframe/cli-agents
+
+# Via cargo
+cargo install cli-agents --features cli
+
+# Or download a binary from GitHub Releases
+# https://github.com/skoppisetty/cli-agents-rs/releases
+```
+
+## Basic usage
+
+The core API is a single function: [`run()`](/api/run). Pass it a [`RunOptions`](/api/types#runoptions) struct and an optional event callback:
+
+```rust
+use cli_agents::{run, RunOptions, StreamEvent, CliName};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() {
+    let opts = RunOptions {
+        cli: Some(CliName::Claude),
+        task: "What is 2+2?".into(),
+        skip_permissions: true,
+        ..Default::default()
+    };
+
+    let handle = run(opts, Some(Arc::new(|event: StreamEvent| {
+        match &event {
+            StreamEvent::TextDelta { text } => print!("{text}"),
+            StreamEvent::Done { result } => println!("\nDone: {:?}", result.success),
+            _ => {}
+        }
+    })));
+
+    let result = handle.result.await.unwrap().unwrap();
+    println!("Success: {}", result.success);
+}
+```
+
+### Auto-discovery
+
+Omit the `cli` field to auto-discover the first available agent. The priority order is Claude → Codex → Gemini:
+
+```rust
+let opts = RunOptions {
+    task: "Summarize this project.".into(),
+    cwd: Some("./my-project".into()),
+    ..Default::default()
+};
+let handle = run(opts, None);
+```
+
+You can also query which CLIs are installed:
+
+```rust
+use cli_agents::discovery::{discover_all, discover_first};
+
+let all = discover_all().await;
+for (name, path) in &all {
+    println!("{name}: {path}");
+}
+```
+
+### Cancellation
+
+The [`RunHandle`](/api/run#runhandle) includes a `CancellationToken` for aborting a run:
+
+```rust
+let handle = run(opts, None);
+
+let cancel = handle.cancel.clone();
+tokio::spawn(async move {
+    tokio::signal::ctrl_c().await.ok();
+    cancel.cancel();
+});
+
+let result = handle.result.await.unwrap().unwrap();
+// result.success == false when cancelled
+```
+
+## Use cases
+
+### Desktop apps (Tauri)
+
+Build rich agentic UIs that leverage whatever AI CLI the user has installed. `RunOptions` is serde-compatible, so frontends pass config as JSON and receive `StreamEvent`s back via Tauri events.
+
+### Dev tools and CI
+
+Build custom coding agents, review bots, or CI automation that piggyback on existing CLI installations — no API keys needed.
+
+### Multi-agent orchestration
+
+Run multiple agents concurrently or route tasks to different providers based on availability.
