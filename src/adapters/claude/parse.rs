@@ -2,6 +2,13 @@ use crate::events::{Severity, StreamEvent};
 use crate::types::{CliName, RunStats};
 use std::collections::HashMap;
 
+struct PendingTool {
+    block_index: u64,
+    tool_id: String,
+    name: String,
+    input_json: String,
+}
+
 #[derive(Default)]
 pub(super) struct ParseState {
     pub result_text: Option<String>,
@@ -9,6 +16,7 @@ pub(super) struct ParseState {
     pub stats: Option<RunStats>,
     pub cost_usd: Option<f64>,
     pub success: Option<bool>,
+    pending_tools: Vec<PendingTool>,
 }
 
 pub(super) fn parse_line(
@@ -64,6 +72,20 @@ pub(super) fn parse_line(
                                     text: text.to_string(),
                                 });
                             }
+                        } else if delta_type == "input_json_delta" {
+                            if let Some(index) = event.get("index").and_then(|v| v.as_u64()) {
+                                let partial = delta
+                                    .get("partial_json")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if let Some(pending) = state
+                                    .pending_tools
+                                    .iter_mut()
+                                    .find(|p| p.block_index == index)
+                                {
+                                    pending.input_json.push_str(partial);
+                                }
+                            }
                         }
                     }
                 }
@@ -71,6 +93,8 @@ pub(super) fn parse_line(
                 "content_block_start" => {
                     if let Some(block) = event.get("content_block") {
                         if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+                            let block_index =
+                                event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
                             let tool_id = block
                                 .get("id")
                                 .and_then(|v| v.as_str())
@@ -81,13 +105,46 @@ pub(super) fn parse_line(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            active_tools.insert(tool_id.clone(), tool_name.clone());
-                            emit(StreamEvent::ToolStart {
-                                tool_name,
+                            state.pending_tools.push(PendingTool {
+                                block_index,
                                 tool_id,
-                                args: None,
+                                name: tool_name,
+                                input_json: String::new(),
                             });
                         }
+                    }
+                }
+
+                "content_block_stop" => {
+                    let block_index = event
+                        .get("index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(u64::MAX);
+                    if let Some(pos) = state
+                        .pending_tools
+                        .iter()
+                        .position(|p| p.block_index == block_index)
+                    {
+                        let pending = state.pending_tools.swap_remove(pos);
+                        let args = if pending.input_json.is_empty() {
+                            None
+                        } else {
+                            serde_json::from_str::<serde_json::Value>(&pending.input_json)
+                                .ok()
+                                .and_then(|v| {
+                                    v.as_object().map(|m| {
+                                        m.iter()
+                                            .map(|(k, v)| (k.clone(), v.clone()))
+                                            .collect::<HashMap<String, serde_json::Value>>()
+                                    })
+                                })
+                        };
+                        active_tools.insert(pending.tool_id.clone(), pending.name.clone());
+                        emit(StreamEvent::ToolStart {
+                            tool_name: pending.name,
+                            tool_id: pending.tool_id,
+                            args,
+                        });
                     }
                 }
 
@@ -100,40 +157,8 @@ pub(super) fn parse_line(
         }
 
         "assistant" => {
-            // Complete assistant message — extract tool_start for tools not yet seen
-            if let Some(message) = parsed.get("message") {
-                if let Some(content) = message.get("content").and_then(|v| v.as_array()) {
-                    for block in content {
-                        if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                            let tool_id = block
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let tool_name = block
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            if !active_tools.contains_key(&tool_id) {
-                                active_tools.insert(tool_id.clone(), tool_name.clone());
-                                let args = block.get("input").and_then(|v| {
-                                    v.as_object().map(|m| {
-                                        m.iter()
-                                            .map(|(k, v)| (k.clone(), v.clone()))
-                                            .collect::<HashMap<String, serde_json::Value>>()
-                                    })
-                                });
-                                emit(StreamEvent::ToolStart {
-                                    tool_name,
-                                    tool_id,
-                                    args,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
+            // Tool starts are handled by content_block_stop (after accumulating
+            // input_json_delta). The assistant message is a no-op for tool tracking.
         }
 
         "user" => {
@@ -325,57 +350,35 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_start_from_content_block_start() {
+    fn parse_tool_start_streaming_with_input_json_delta() {
         let (emit, events) = collector();
         let mut state = ParseState::default();
         let mut tools = HashMap::new();
 
-        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tool_1","name":"read_file"}}}"#;
-        parse_line(line, &mut state, &mut tools, &emit);
-
-        assert!(tools.contains_key("tool_1"));
-        let evts = events.lock().unwrap();
-        assert_eq!(evts.len(), 1);
-        assert!(
-            matches!(&evts[0], StreamEvent::ToolStart { tool_name, tool_id, .. }
-            if tool_name == "read_file" && tool_id == "tool_1")
-        );
-    }
-
-    #[test]
-    fn parse_tool_start_dedup_from_assistant() {
-        let (emit, events) = collector();
-        let mut state = ParseState::default();
-        let mut tools = HashMap::new();
-
-        // First: content_block_start emits tool_start
-        let line1 = r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tool_1","name":"read_file"}}}"#;
+        // 1. content_block_start — registers pending tool
+        let line1 = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool_1","name":"Read"}}}"#;
         parse_line(line1, &mut state, &mut tools, &emit);
+        assert_eq!(events.lock().unwrap().len(), 0); // no emit yet
 
-        // Then: assistant message with same tool — should NOT emit duplicate
-        let line2 = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_1","name":"read_file","input":{"path":"/tmp"}}]}}"#;
+        // 2. input_json_delta — accumulate partial JSON
+        let line2 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\": \"/tmp/"}}}"#;
         parse_line(line2, &mut state, &mut tools, &emit);
 
-        let evts = events.lock().unwrap();
-        assert_eq!(evts.len(), 1); // Only one tool_start
-    }
+        let line3 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"test.rs\"}"}}}"#;
+        parse_line(line3, &mut state, &mut tools, &emit);
 
-    #[test]
-    fn parse_tool_start_from_assistant_only() {
-        let (emit, events) = collector();
-        let mut state = ParseState::default();
-        let mut tools = HashMap::new();
-
-        // No content_block_start — tool_start should come from assistant message
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_2","name":"write_file","input":{"path":"/tmp/out","content":"hi"}}]}}"#;
-        parse_line(line, &mut state, &mut tools, &emit);
+        // 3. content_block_stop — emit ToolStart with parsed args
+        let line4 = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#;
+        parse_line(line4, &mut state, &mut tools, &emit);
 
         let evts = events.lock().unwrap();
         assert_eq!(evts.len(), 1);
         assert!(
             matches!(&evts[0], StreamEvent::ToolStart { tool_name, tool_id, args }
-            if tool_name == "write_file" && tool_id == "tool_2" && args.is_some())
+            if tool_name == "Read" && tool_id == "tool_1"
+            && args.as_ref().unwrap().get("file_path").unwrap() == "/tmp/test.rs")
         );
+        assert!(tools.contains_key("tool_1"));
     }
 
     #[test]
@@ -525,12 +528,15 @@ mod tests {
 
         let lines = [
             r#"{"type":"system","session_id":"sess-42","tools":["read_file"]}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"I'll read "}}}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"the file."}}}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"t1","name":"read_file"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I'll read "}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"the file."}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t1","name":"read_file"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/tmp/test.rs\"}"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"I'll read the file."},{"type":"tool_use","id":"t1","name":"read_file","input":{"file_path":"/tmp/test.rs"}}]}}"#,
             r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"hello world","is_error":false}]}}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"The file says hello."}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The file says hello."}}}"#,
             r#"{"type":"result","subtype":"success","result":"Done.","session_id":"sess-42","usage":{"input_tokens":50,"output_tokens":25}}"#,
         ];
 
@@ -540,11 +546,10 @@ mod tests {
 
         assert_eq!(state.session_id.as_deref(), Some("sess-42"));
         assert_eq!(state.success, Some(true));
-        // result_text from the result message overrides accumulated text
         assert_eq!(state.result_text.as_deref(), Some("Done."));
 
         let evts = events.lock().unwrap();
-        // Raw(system) + TextDelta + TextDelta + ToolStart + TurnEnd + ToolEnd + TextDelta + (no event for success result)
+        // Raw(system) + TextDelta + TextDelta + ToolStart(from content_block_stop) + TurnEnd + ToolEnd + TextDelta
         assert_eq!(evts.len(), 7);
     }
 

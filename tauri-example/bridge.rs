@@ -1,11 +1,8 @@
-// Example: Tauri desktop app integration with cli-agents.
+// Tauri desktop app integration with cli-agents.
 //
-// This file is illustrative — it depends on `tauri`, `specta`, and `log`
-// which are not dependencies of this crate. Copy and adapt it into your
-// own Tauri project.
-//
-// It is placed in doc/ (not examples/) because it cannot compile without
-// external dependencies.
+// This file depends on `tauri`, `specta`, and `log` which are not
+// dependencies of this crate. Copy and adapt it into your own Tauri project.
+// See README.md in this directory for usage details.
 
 use std::collections::HashMap;
 use std::sync::Arc;

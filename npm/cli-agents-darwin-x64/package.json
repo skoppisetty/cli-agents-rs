@@ -1,0 +1,11 @@
+{
+  "name": "@cueframe/cli-agents-darwin-x64",
+  "version": "0.0.0",
+  "description": "cli-agents binary for macOS x64",
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["bin", "README.md"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/skoppisetty/cli-agents-rs.git" },
+  "preferUnplugged": true
+}

@@ -217,7 +217,6 @@ pub fn clear_cache() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn nvm_version_sorting() {
@@ -244,23 +243,22 @@ mod tests {
         assert_eq!(versions, vec!["v22.0.0", "v20.11.0", "v18.17.1"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn is_executable_checks_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
 
-        // Non-executable file
         let non_exec = dir.path().join("not-exec");
         std::fs::write(&non_exec, "#!/bin/sh").unwrap();
         std::fs::set_permissions(&non_exec, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(!is_executable(&non_exec));
 
-        // Executable file
         let exec = dir.path().join("exec");
         std::fs::write(&exec, "#!/bin/sh").unwrap();
         std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(is_executable(&exec));
 
-        // Non-existent path
         assert!(!is_executable(Path::new("/does/not/exist")));
     }
 

@@ -1,5 +1,10 @@
 # cli-agents
 
+[![Crates.io](https://img.shields.io/crates/v/cli-agents.svg)](https://crates.io/crates/cli-agents)
+[![npm](https://img.shields.io/npm/v/@cueframe/cli-agents.svg)](https://www.npmjs.com/package/@cueframe/cli-agents)
+[![CI](https://github.com/skoppisetty/cli-agents-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/skoppisetty/cli-agents-rs/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Build agentic apps on top of your users' existing AI subscriptions.
 
 Instead of requiring API keys or managing token costs, `cli-agents` spawns
@@ -50,15 +55,30 @@ async fn main() {
 
 ## Installation
 
-Add to your `Cargo.toml`:
+### As a Rust library
 
 ```toml
 [dependencies]
-cli-agents = "0.1"
+cli-agents = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
-You must have at least one supported CLI installed:
+### As a CLI tool
+
+```bash
+# Via npm (recommended — prebuilt binaries, no Rust toolchain needed)
+npm install -g @cueframe/cli-agents
+
+# Via cargo
+cargo install cli-agents --features cli
+
+# Or download a binary from GitHub Releases
+# https://github.com/skoppisetty/cli-agents-rs/releases
+```
+
+### Prerequisites
+
+You need at least one supported AI CLI installed:
 
 | CLI | Install |
 |-----|---------|
@@ -201,7 +221,7 @@ The primary use case. Build rich agentic UIs that leverage whatever AI CLI
 the user has installed. `RunOptions` is serde-compatible, so front ends pass
 config as JSON and receive `StreamEvent`s back via Tauri events.
 
-See [`doc/tauri_bridge_example.rs`](doc/tauri_bridge_example.rs) for a
+See [`tauri-example/`](tauri-example/) for a
 complete Tauri integration with streaming and cancellation.
 
 ### Dev tools and CI
@@ -229,11 +249,7 @@ on availability or capability.
 
 ## CLI binary
 
-The crate includes an optional CLI binary behind the `cli` feature:
-
 ```bash
-cargo install cli-agents --features cli
-
 # Summarize a project (auto-discovers installed CLI)
 cli-agents --cwd ./my-project "Read the README and summarize this project."
 
@@ -257,8 +273,13 @@ cli-agents --discover
 
 ## Platform support
 
-Currently Unix-only (macOS, Linux). Binary discovery uses `which` and
-Unix file permission checks. Windows support is not yet implemented.
+| Platform | Status |
+|----------|--------|
+| macOS (ARM64, x64) | Fully tested end-to-end |
+| Linux (x64, ARM64) | Compiles and passes unit tests in CI — not yet tested end-to-end. Feedback welcome! |
+| Windows (x64) | Compiles and passes unit tests in CI — CLI discovery and process groups use Unix APIs and need platform-specific implementations. Contributions welcome! |
+
+If you run into issues on Linux or Windows, please [open an issue](https://github.com/skoppisetty/cli-agents-rs/issues). The main platform-specific code is in `src/discovery.rs` (binary lookup) and `src/adapters/mod.rs` (process group handling).
 
 ## Contributing
 

@@ -1,0 +1,11 @@
+{
+  "name": "@cueframe/cli-agents-win32-x64",
+  "version": "0.0.0",
+  "description": "cli-agents binary for Windows x64",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": ["bin", "README.md"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/skoppisetty/cli-agents-rs.git" },
+  "preferUnplugged": true
+}

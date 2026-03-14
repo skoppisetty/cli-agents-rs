@@ -85,6 +85,13 @@ async fn main() {
         cwd: args.cwd,
         model: args.model,
         skip_permissions: args.skip_permissions,
+        providers: Some(cli_agents::ProviderOptions {
+            claude: Some(cli_agents::ClaudeOptions {
+                include_partial_messages: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -177,13 +184,17 @@ async fn main() {
 
     let handle = run(opts, Some(on_event));
 
-    // Handle Ctrl+C — abort the run
-    let cancel = handle.cancel.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        eprintln!("\nCancelling...");
-        cancel.cancel();
-    });
+    // Only handle Ctrl+C when running as a top-level CLI (stdin is a terminal).
+    // When spawned as a subprocess, let the parent handle SIGINT — otherwise
+    // tokio::signal::ctrl_c() steals SIGINT from the parent's process group.
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        let cancel = handle.cancel.clone();
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.ok();
+            eprintln!("\nCancelling...");
+            cancel.cancel();
+        });
+    }
 
     match handle.result.await {
         Ok(Ok(result)) => {

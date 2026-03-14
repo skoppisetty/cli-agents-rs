@@ -1,0 +1,19 @@
+{
+  "name": "@cueframe/cli-agents",
+  "version": "0.0.0",
+  "description": "Build agentic apps over users' existing AI subscriptions (Claude, Codex, Gemini)",
+  "main": "index.js",
+  "bin": {
+    "cli-agents": "bin/cli-agents"
+  },
+  "files": ["index.js", "bin", "README.md"],
+  "optionalDependencies": {
+    "@cueframe/cli-agents-darwin-arm64": "0.0.0",
+    "@cueframe/cli-agents-darwin-x64": "0.0.0",
+    "@cueframe/cli-agents-linux-x64": "0.0.0",
+    "@cueframe/cli-agents-linux-arm64": "0.0.0",
+    "@cueframe/cli-agents-win32-x64": "0.0.0"
+  },
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/skoppisetty/cli-agents-rs.git" }
+}

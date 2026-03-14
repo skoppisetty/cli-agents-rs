@@ -116,16 +116,32 @@ pub(crate) async fn spawn_and_stream(
     } = params;
     debug!(cli = cli_label, binary = %binary, args = ?args, "spawning CLI");
 
-    let mut child = Command::new(binary)
-        .args(args)
+    let mut cmd = Command::new(binary);
+    cmd.args(args)
         .envs(extra_env)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+
+    #[cfg(unix)]
+    {
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| Error::Process(format!("failed to spawn {cli_label}: {e}")))?;
+
+    let child_pid = child.id();
 
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -151,7 +167,7 @@ pub(crate) async fn spawn_and_stream(
                         total_bytes += n;
                         if total_bytes > max_bytes {
                             warn!(cli = cli_label, total_bytes, max_bytes, "output exceeded max buffer size");
-                            let _ = child.kill().await;
+                            kill_process_group(&mut child, child_pid).await;
                             return Err(Error::Process(format!(
                                 "output exceeded max buffer size ({max_bytes} bytes)"
                             )));
@@ -165,7 +181,7 @@ pub(crate) async fn spawn_and_stream(
                 }
             }
             _ = cancel.cancelled() => {
-                let _ = child.kill().await;
+                kill_process_group(&mut child, child_pid).await;
                 return Ok(SpawnOutcome::Cancelled);
             }
         }
@@ -183,4 +199,16 @@ pub(crate) async fn spawn_and_stream(
             Some(stderr_text)
         },
     })
+}
+
+async fn kill_process_group(child: &mut tokio::process::Child, pid: Option<u32>) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = pid {
+            unsafe {
+                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill().await;
 }

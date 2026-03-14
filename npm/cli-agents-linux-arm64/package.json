@@ -1,0 +1,11 @@
+{
+  "name": "@cueframe/cli-agents-linux-arm64",
+  "version": "0.0.0",
+  "description": "cli-agents binary for Linux ARM64",
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "files": ["bin", "README.md"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/skoppisetty/cli-agents-rs.git" },
+  "preferUnplugged": true
+}
