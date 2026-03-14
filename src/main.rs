@@ -19,6 +19,10 @@ struct Args {
     #[arg(long)]
     system: Option<String>,
 
+    /// Append to the system prompt
+    #[arg(long)]
+    append_system_prompt: Option<String>,
+
     /// Working directory
     #[arg(long)]
     cwd: Option<String>,
@@ -78,16 +82,24 @@ async fn main() {
         std::process::exit(1);
     }
 
+    let system_prompt = match (&args.system, &args.append_system_prompt) {
+        (Some(base), Some(extra)) => Some(format!("{base}\n\n{extra}")),
+        (Some(base), None) => Some(base.clone()),
+        (None, Some(extra)) => Some(extra.clone()),
+        (None, None) => None,
+    };
+
     let opts = RunOptions {
         cli: args.cli,
         task,
-        system_prompt: args.system,
+        system_prompt,
         cwd: args.cwd,
         model: args.model,
         skip_permissions: args.skip_permissions,
         providers: Some(cli_agents::ProviderOptions {
             claude: Some(cli_agents::ClaudeOptions {
                 include_partial_messages: Some(true),
+                append_system_prompt: args.append_system_prompt.clone(),
                 ..Default::default()
             }),
             ..Default::default()
