@@ -11,8 +11,13 @@
     "**/dist/**"
   ],
   "theme": "black",
+  "title": "cli-agents",
   "sections": [
     "guide",
     "api"
-  ]
+  ],
+  "github": {
+    "user": "skoppisetty",
+    "repo": "cli-agents-rs"
+  }
 }
