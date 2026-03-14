@@ -68,7 +68,7 @@ jobs:
         run: |
           mkdir -p staging
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} staging/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.npm_pkg }}
           path: staging/
