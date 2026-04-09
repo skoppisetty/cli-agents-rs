@@ -142,12 +142,21 @@ async fn write_configs(
     let tmp_dir = tempfile::tempdir().map_err(Error::Io)?;
     let mut env = HashMap::new();
 
-    // MCP servers → workspace-level .gemini/settings.json in the temp dir.
+    // MCP servers → workspace-level .gemini/settings.json.
     // Gemini CLI merges workspace config (from cwd) with user config (~/.gemini/),
     // preserving auth credentials while adding our MCP servers.
+    //
+    // If opts.cwd is set, write config there (persistent, enables session resume).
+    // Otherwise, use the temp dir (ephemeral, no session resume).
     let cwd_override = if let Some(servers) = &opts.mcp_servers {
         if !servers.is_empty() {
-            let gemini_dir = tmp_dir.path().join(".gemini");
+            let config_dir = if let Some(cwd) = &opts.cwd {
+                std::path::PathBuf::from(cwd)
+            } else {
+                tmp_dir.path().to_path_buf()
+            };
+
+            let gemini_dir = config_dir.join(".gemini");
             tokio::fs::create_dir_all(&gemini_dir)
                 .await
                 .map_err(Error::Io)?;
@@ -158,8 +167,13 @@ async fn write_configs(
                 .await
                 .map_err(Error::Io)?;
 
-            // Use the temp dir as cwd so Gemini finds the workspace config.
-            Some(tmp_dir.path().to_string_lossy().into_owned())
+            // If we wrote to opts.cwd, no override needed — the adapter
+            // already uses opts.cwd. If we wrote to temp dir, override cwd.
+            if opts.cwd.is_none() {
+                Some(tmp_dir.path().to_string_lossy().into_owned())
+            } else {
+                None
+            }
         } else {
             None
         }
