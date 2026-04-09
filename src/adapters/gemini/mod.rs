@@ -91,9 +91,11 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
         args.push(model.clone());
     }
 
-    if let Some(session_id) = &opts.resume_session_id {
+    // Gemini's --resume takes "latest" or an index, not a UUID session ID.
+    // Use "latest" to resume the most recent session in the cwd.
+    if opts.resume_session_id.is_some() {
         args.push("--resume".into());
-        args.push(session_id.clone());
+        args.push("latest".into());
     }
 
     // Permission bypass for non-interactive use (opt-in)
