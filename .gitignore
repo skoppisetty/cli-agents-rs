@@ -5,3 +5,4 @@ Cargo.lock
 # autodocs build cache
 .autodocs/
 .vercel
+.deepwork/
