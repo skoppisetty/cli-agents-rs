@@ -98,9 +98,12 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
         if gemini.sandbox == Some(true) {
             args.push("-s".into());
         }
-        if let Some(mode) = &gemini.approval_mode {
-            args.push("--approval-mode".into());
-            args.push(mode.clone());
+        // Skip --approval-mode when --yolo is already set (they conflict in Gemini CLI).
+        if !opts.skip_permissions {
+            if let Some(mode) = &gemini.approval_mode {
+                args.push("--approval-mode".into());
+                args.push(mode.clone());
+            }
         }
         if let Some(extra) = &gemini.extra_args {
             args.extend(extra.clone());
