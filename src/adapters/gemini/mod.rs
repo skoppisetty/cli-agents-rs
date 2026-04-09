@@ -29,12 +29,19 @@ impl CliAdapter for GeminiAdapter {
 
         // Write temp configs if needed.
         // Hold the TempDir so it lives until the child process exits.
-        let (config_env, _tmp_dir) = write_configs(opts).await?;
+        let (config_env, cwd_override, _tmp_dir) = write_configs(opts).await?;
 
         let cli_args = build_args(opts);
         let mut extra_env = opts.env.clone().unwrap_or_default();
         extra_env.extend(config_env);
         let max_bytes = opts.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
+
+        // Use cwd override (temp dir with workspace MCP config) if set,
+        // otherwise use the user-specified cwd.
+        let effective_cwd = cwd_override
+            .as_deref()
+            .or(opts.cwd.as_deref())
+            .unwrap_or(".");
 
         let mut state = parse::ParseState::default();
 
@@ -44,7 +51,7 @@ impl CliAdapter for GeminiAdapter {
                 binary: &binary,
                 args: &cli_args,
                 extra_env: &extra_env,
-                cwd: opts.cwd.as_deref().unwrap_or("."),
+                cwd: effective_cwd,
                 max_bytes,
                 cancel: &cancel,
             },
@@ -115,11 +122,11 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
 
 /// Write temporary config files for MCP servers and system prompts.
 ///
-/// Returns the env vars to set and the temp dir handle (must be kept alive
-/// until the child process exits). Only allocates a temp dir when needed.
+/// Returns env vars, an optional cwd override, and the temp dir handle
+/// (must be kept alive until the child process exits).
 async fn write_configs(
     opts: &RunOptions,
-) -> Result<(HashMap<String, String>, Option<tempfile::TempDir>)> {
+) -> Result<(HashMap<String, String>, Option<String>, Option<tempfile::TempDir>)> {
     let has_mcp = opts.mcp_servers.as_ref().is_some_and(|s| !s.is_empty());
     let needs_prompt_file = opts.system_prompt_file.is_none() && opts.system_prompt.is_some();
 
@@ -129,14 +136,16 @@ async fn write_configs(
         if let Some(path) = &opts.system_prompt_file {
             env.insert("GEMINI_SYSTEM_MD".into(), path.clone());
         }
-        return Ok((env, None));
+        return Ok((env, None, None));
     }
 
     let tmp_dir = tempfile::tempdir().map_err(Error::Io)?;
     let mut env = HashMap::new();
 
-    // MCP servers → .gemini/settings.json
-    if let Some(servers) = &opts.mcp_servers {
+    // MCP servers → workspace-level .gemini/settings.json in the temp dir.
+    // Gemini CLI merges workspace config (from cwd) with user config (~/.gemini/),
+    // preserving auth credentials while adding our MCP servers.
+    let cwd_override = if let Some(servers) = &opts.mcp_servers {
         if !servers.is_empty() {
             let gemini_dir = tmp_dir.path().join(".gemini");
             tokio::fs::create_dir_all(&gemini_dir)
@@ -149,12 +158,14 @@ async fn write_configs(
                 .await
                 .map_err(Error::Io)?;
 
-            env.insert(
-                "GEMINI_HOME".into(),
-                tmp_dir.path().to_string_lossy().into_owned(),
-            );
+            // Use the temp dir as cwd so Gemini finds the workspace config.
+            Some(tmp_dir.path().to_string_lossy().into_owned())
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
     // System prompt → file referenced by GEMINI_SYSTEM_MD
     // system_prompt_file takes precedence (use the file directly).
@@ -171,7 +182,7 @@ async fn write_configs(
         );
     }
 
-    Ok((env, Some(tmp_dir)))
+    Ok((env, cwd_override, Some(tmp_dir)))
 }
 
 fn build_mcp_settings(servers: &HashMap<String, McpServer>) -> serde_json::Value {
