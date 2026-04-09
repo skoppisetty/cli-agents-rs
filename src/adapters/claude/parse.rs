@@ -17,6 +17,9 @@ pub(super) struct ParseState {
     pub cost_usd: Option<f64>,
     pub success: Option<bool>,
     pending_tools: Vec<PendingTool>,
+    /// True once any text has been emitted via stream_event content_block_delta.
+    /// Used to avoid re-emitting the same text from the assistant summary message.
+    streamed_text: bool,
 }
 
 pub(super) fn parse_line(
@@ -63,6 +66,7 @@ pub(super) fn parse_line(
                                 emit(StreamEvent::TextDelta {
                                     text: text.to_string(),
                                 });
+                                state.streamed_text = true;
                                 let rt = state.result_text.get_or_insert_with(String::new);
                                 rt.push_str(text);
                             }
@@ -157,8 +161,42 @@ pub(super) fn parse_line(
         }
 
         "assistant" => {
-            // Tool starts are handled by content_block_stop (after accumulating
-            // input_json_delta). The assistant message is a no-op for tool tracking.
+            // Claude Code emits assistant messages as turn-level summaries.
+            // If granular stream_event deltas were already emitted for this turn,
+            // the text is already in result_text — skip to avoid duplication.
+            // Otherwise, emit the text as a fallback so consumers always get it.
+            if let Some(content) = parsed
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                for block in content {
+                    let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    match block_type {
+                        "text" if !state.streamed_text => {
+                            if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                                if !text.is_empty() {
+                                    emit(StreamEvent::TextDelta {
+                                        text: text.to_string(),
+                                    });
+                                    let rt = state.result_text.get_or_insert_with(String::new);
+                                    rt.push_str(text);
+                                }
+                            }
+                        }
+                        "thinking" => {
+                            if let Some(text) = block.get("thinking").and_then(|v| v.as_str()) {
+                                if !text.is_empty() {
+                                    emit(StreamEvent::ThinkingDelta {
+                                        text: text.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
 
         "user" => {
