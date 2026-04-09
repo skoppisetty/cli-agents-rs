@@ -69,6 +69,10 @@ pub struct ClaudeOptions {
     pub include_partial_messages: Option<bool>,
     pub effort: Option<String>,
     pub agents: Option<serde_json::Value>,
+    /// Minimal mode: skip hooks, LSP, plugins, auto-memory, CLAUDE.md discovery.
+    /// Only system-prompt, mcp-config, and settings are loaded.
+    #[serde(default)]
+    pub bare: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

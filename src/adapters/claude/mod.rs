@@ -133,6 +133,9 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
                 args.push(json);
             }
         }
+        if co.bare {
+            args.push("--bare".into());
+        }
     }
 
     if let Some(path) = &opts.system_prompt_file {
