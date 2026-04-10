@@ -201,6 +201,24 @@ pub(crate) async fn spawn_and_stream(
     })
 }
 
+/// Extract a user-friendly error message from CLI stderr.
+/// When an agent fails with no text output, this provides something
+/// meaningful to show the user instead of a blank response.
+pub(crate) fn extract_error_message(stderr: Option<&str>) -> Option<String> {
+    let stderr = stderr?;
+    // Find the most informative error line.
+    let msg = stderr
+        .lines()
+        .filter(|l| !l.is_empty())
+        .find(|l| {
+            let lower = l.to_lowercase();
+            lower.contains("error") || lower.contains("limit") || lower.contains("failed")
+                || lower.contains("denied") || lower.contains("unauthorized")
+        })
+        .or_else(|| stderr.lines().filter(|l| !l.is_empty()).last());
+    msg.map(|s| s.trim().to_string())
+}
+
 async fn kill_process_group(child: &mut tokio::process::Child, pid: Option<u32>) {
     #[cfg(unix)]
     {

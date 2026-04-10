@@ -61,15 +61,23 @@ impl CliAdapter for CodexAdapter {
                 text: Some("Cancelled.".into()),
                 ..Default::default()
             }),
-            crate::adapters::SpawnOutcome::Done { exit_code, stderr } => Ok(RunResult {
-                success: !state.failed && exit_code == 0,
-                text: state.result_text,
-                exit_code: Some(exit_code),
-                stats: state.stats,
-                session_id: state.session_id,
-                stderr,
-                cost_usd: None,
-            }),
+            crate::adapters::SpawnOutcome::Done { exit_code, stderr } => {
+                let success = !state.failed && exit_code == 0;
+                let text = if !success && state.result_text.is_none() {
+                    crate::adapters::extract_error_message(stderr.as_deref())
+                } else {
+                    state.result_text
+                };
+                Ok(RunResult {
+                    success,
+                    text,
+                    exit_code: Some(exit_code),
+                    stats: state.stats,
+                    session_id: state.session_id,
+                    stderr,
+                    cost_usd: None,
+                })
+            }
         }
     }
 }

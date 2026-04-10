@@ -54,15 +54,25 @@ impl CliAdapter for ClaudeAdapter {
                 text: Some("Cancelled.".into()),
                 ..Default::default()
             }),
-            crate::adapters::SpawnOutcome::Done { exit_code, stderr } => Ok(RunResult {
-                success: state.success.unwrap_or(exit_code == 0),
-                text: state.result_text,
-                exit_code: Some(exit_code),
-                stats: state.stats,
-                session_id: state.session_id,
-                stderr,
-                cost_usd: state.cost_usd,
-            }),
+            crate::adapters::SpawnOutcome::Done { exit_code, stderr } => {
+                let success = state.success.unwrap_or(exit_code == 0);
+                // When the agent fails with no text, surface the error from
+                // stderr so consumers always have something to show the user.
+                let text = if !success && state.result_text.is_none() {
+                    crate::adapters::extract_error_message(stderr.as_deref())
+                } else {
+                    state.result_text
+                };
+                Ok(RunResult {
+                    success,
+                    text,
+                    exit_code: Some(exit_code),
+                    stats: state.stats,
+                    session_id: state.session_id,
+                    stderr,
+                    cost_usd: state.cost_usd,
+                })
+            }
         }
     }
 }
