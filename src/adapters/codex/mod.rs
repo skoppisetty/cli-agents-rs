@@ -100,7 +100,7 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
     }
 
     if let Some(cwd) = &opts.cwd {
-        args.push("--cd".into());
+        args.push("-C".into());
         args.push(cwd.clone());
     }
 
@@ -124,7 +124,7 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
         }
         if let Some(dirs) = &co.additional_directories {
             for dir in dirs {
-                args.push("--cd".into());
+                args.push("-C".into());
                 args.push(dir.clone());
             }
         }
