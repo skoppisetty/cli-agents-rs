@@ -1,11 +1,11 @@
 mod parse;
 
-use crate::DEFAULT_MAX_OUTPUT_BYTES;
 use crate::adapters::CliAdapter;
 use crate::discovery::discover_binary;
 use crate::error::{Error, Result};
 use crate::events::StreamEvent;
 use crate::types::{CliName, McpServer, RunOptions, RunResult};
+use crate::DEFAULT_MAX_OUTPUT_BYTES;
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 
@@ -136,7 +136,11 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
 /// (must be kept alive until the child process exits).
 async fn write_configs(
     opts: &RunOptions,
-) -> Result<(HashMap<String, String>, Option<String>, Option<tempfile::TempDir>)> {
+) -> Result<(
+    HashMap<String, String>,
+    Option<String>,
+    Option<tempfile::TempDir>,
+)> {
     let has_mcp = opts.mcp_servers.as_ref().is_some_and(|s| !s.is_empty());
     let needs_prompt_file = opts.system_prompt_file.is_none() && opts.system_prompt.is_some();
 

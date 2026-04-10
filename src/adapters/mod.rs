@@ -212,8 +212,11 @@ pub(crate) fn extract_error_message(stderr: Option<&str>) -> Option<String> {
         .filter(|l| !l.is_empty())
         .find(|l| {
             let lower = l.to_lowercase();
-            lower.contains("error") || lower.contains("limit") || lower.contains("failed")
-                || lower.contains("denied") || lower.contains("unauthorized")
+            lower.contains("error")
+                || lower.contains("limit")
+                || lower.contains("failed")
+                || lower.contains("denied")
+                || lower.contains("unauthorized")
         })
         .or_else(|| stderr.lines().filter(|l| !l.is_empty()).last());
     msg.map(|s| s.trim().to_string())

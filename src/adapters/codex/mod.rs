@@ -149,6 +149,11 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
         args.push("--dangerously-bypass-approvals-and-sandbox".into());
     }
 
+    // Programmatic callers often set cwd to a non-git directory.
+    if opts.skip_permissions {
+        args.push("--skip-git-repo-check".into());
+    }
+
     args
 }
 
@@ -285,6 +290,7 @@ mod tests {
         };
         let args = build_args(&opts);
         assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
     }
 
     #[test]
@@ -342,6 +348,7 @@ mod tests {
             !args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
             "should not pass both --full-auto and --dangerously-bypass-approvals-and-sandbox"
         );
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
     }
 
     #[tokio::test]
