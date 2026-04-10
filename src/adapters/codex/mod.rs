@@ -1,11 +1,11 @@
 mod parse;
 
-use crate::DEFAULT_MAX_OUTPUT_BYTES;
 use crate::adapters::CliAdapter;
 use crate::discovery::discover_binary;
 use crate::error::{Error, Result};
 use crate::events::StreamEvent;
 use crate::types::{CliName, RunOptions, RunResult};
+use crate::DEFAULT_MAX_OUTPUT_BYTES;
 use serde::Serialize;
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
@@ -140,8 +140,12 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
         }
     }
 
-    // Permission bypass for non-interactive use (opt-in)
-    if opts.skip_permissions {
+    // Permission bypass for non-interactive use (opt-in).
+    // Skip if an explicit approval_policy is set — the two flags conflict.
+    let has_policy = codex_opts
+        .and_then(|c| c.approval_policy.as_deref())
+        .is_some_and(|p| !p.is_empty());
+    if opts.skip_permissions && !has_policy {
         args.push("--dangerously-bypass-approvals-and-sandbox".into());
     }
 
@@ -316,6 +320,28 @@ mod tests {
         assert!(args.contains(&"--sandbox".to_string()));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"o3".to_string()));
+    }
+
+    #[test]
+    fn build_args_full_auto_with_skip_permissions_no_conflict() {
+        let opts = RunOptions {
+            task: "fix bug".into(),
+            skip_permissions: true,
+            providers: Some(crate::types::ProviderOptions {
+                codex: Some(crate::types::CodexOptions {
+                    approval_policy: Some("full-auto".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let args = build_args(&opts);
+        assert!(args.contains(&"--full-auto".to_string()));
+        assert!(
+            !args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
+            "should not pass both --full-auto and --dangerously-bypass-approvals-and-sandbox"
+        );
     }
 
     #[tokio::test]
