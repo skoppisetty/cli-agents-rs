@@ -54,5 +54,5 @@ pub use events::{Severity, StreamEvent};
 pub use runner::{RunHandle, run};
 pub use types::{
     ClaudeOptions, CliName, CodexOptions, GeminiOptions, McpServer, McpTransport, ProviderOptions,
-    RunOptions, RunResult, RunStats,
+    RunOptions, RunResult, RunStats, SettingSource,
 };

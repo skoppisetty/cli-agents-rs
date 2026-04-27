@@ -53,6 +53,30 @@ pub enum McpTransport {
     Http,
 }
 
+/// Filesystem setting sources Claude Code loads at startup.
+///
+/// Maps to the `--setting-sources` CLI flag. When omitted, the Claude CLI
+/// loads all three (user, project, local) and fires their hooks.
+/// Pass `Some(vec![])` to skip all of them — useful when embedding the CLI
+/// in another app that doesn't want global SessionStart hooks running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingSource {
+    User,
+    Project,
+    Local,
+}
+
+impl SettingSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Project => "project",
+            Self::Local => "local",
+        }
+    }
+}
+
 // ── Provider-specific options ──
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -69,6 +93,10 @@ pub struct ClaudeOptions {
     pub include_partial_messages: Option<bool>,
     pub effort: Option<String>,
     pub agents: Option<serde_json::Value>,
+    /// Filesystem settings the CLI loads (and fires hooks for).
+    /// `None` = let the CLI default (loads user/project/local).
+    /// `Some(vec![])` = load nothing — silences global SessionStart hooks.
+    pub setting_sources: Option<Vec<SettingSource>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

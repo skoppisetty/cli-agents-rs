@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.11
+
+### Added
+- `ClaudeOptions::setting_sources` — controls Claude's `--setting-sources` flag. Pass `Some(vec![])` to skip user/project/local settings and silence global `SessionStart` hooks when embedding the CLI in another app.
+- `SettingSource` enum (`User`, `Project`, `Local`) re-exported from the crate root.
+- Claude adapter strips `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the inherited environment before spawning, so the CLI uses its subscription credentials (OAuth/keychain) instead of silently falling back to API-token billing when the host process happens to have those env vars set. Callers can re-supply them explicitly via `RunOptions::env` if needed.
+
+### Fixed
+- Codex adapter no longer wipes the user's auth and history when MCP servers or a system prompt are configured. Previously, the temporary `CODEX_HOME` contained only the synthesized config, so the spawned CLI ran without credentials. The temp dir now symlinks the real `~/.codex` entries (auth, sessions, history) and writes a merged `config.toml` that overlays the new fields onto existing keys.
+
 ## 0.2.0
 
 ### Added

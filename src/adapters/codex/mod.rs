@@ -8,6 +8,7 @@ use crate::types::{CliName, RunOptions, RunResult};
 use crate::DEFAULT_MAX_OUTPUT_BYTES;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -47,6 +48,7 @@ impl CliAdapter for CodexAdapter {
                 binary: &binary,
                 args: &args,
                 extra_env: &extra_env,
+                strip_env: &[],
                 cwd: opts.cwd.as_deref().unwrap_or("."),
                 max_bytes,
                 cancel: &cancel,
@@ -200,10 +202,10 @@ async fn write_configs(
     }
 
     let tmp_dir = tempfile::tempdir().map_err(Error::Io)?;
-    let codex_dir = tmp_dir.path().join(".codex");
-    tokio::fs::create_dir_all(&codex_dir)
-        .await
-        .map_err(Error::Io)?;
+    let codex_home = resolve_codex_home();
+    if let Some(home) = &codex_home {
+        link_codex_home_contents(home, tmp_dir.path())?;
+    }
 
     let config = CodexConfig {
         instructions: system_prompt,
@@ -226,10 +228,11 @@ async fn write_configs(
         }),
     };
 
-    let toml_str = toml::to_string_pretty(&config)
+    let existing_config = codex_home.as_ref().map(|h| h.join("config.toml"));
+    let config_table = merge_config(existing_config.as_deref(), config)?;
+    let toml_str = toml::to_string_pretty(&config_table)
         .map_err(|e| Error::Other(format!("TOML serialization: {e}")))?;
-
-    let config_path = codex_dir.join("config.toml");
+    let config_path = tmp_dir.path().join("config.toml");
     tokio::fs::write(&config_path, toml_str)
         .await
         .map_err(Error::Io)?;
@@ -240,6 +243,69 @@ async fn write_configs(
         tmp_dir.path().to_string_lossy().into_owned(),
     );
     Ok((env, Some(tmp_dir)))
+}
+
+fn resolve_codex_home() -> Option<PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+}
+
+/// Symlink top-level entries of `src` into `dst`, skipping `config.toml`
+/// (we write our own merged version). Symlinks avoid copying potentially
+/// large session/history directories on every run.
+fn link_codex_home_contents(src: &Path, dst: &Path) -> Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(src).map_err(Error::Io)? {
+        let entry = entry.map_err(Error::Io)?;
+        if entry.file_name() == "config.toml" {
+            continue;
+        }
+        let target = dst.join(entry.file_name());
+        symlink_entry(&entry.path(), &target)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink_entry(src: &Path, dst: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(src, dst).map_err(Error::Io)
+}
+
+#[cfg(windows)]
+fn symlink_entry(src: &Path, dst: &Path) -> Result<()> {
+    if src.is_dir() {
+        std::os::windows::fs::symlink_dir(src, dst).map_err(Error::Io)
+    } else {
+        std::os::windows::fs::symlink_file(src, dst).map_err(Error::Io)
+    }
+}
+
+fn merge_config(existing_config: Option<&Path>, config: CodexConfig) -> Result<toml::Table> {
+    let mut table = match existing_config {
+        Some(path) if path.exists() => {
+            let existing = std::fs::read_to_string(path).map_err(Error::Io)?;
+            toml::from_str::<toml::Table>(&existing)
+                .map_err(|e| Error::Other(format!("TOML parse: {e}")))?
+        }
+        _ => toml::Table::new(),
+    };
+
+    if let Some(instructions) = config.instructions {
+        table.insert("instructions".into(), toml::Value::String(instructions));
+    }
+
+    if let Some(mcp_servers) = config.mcp_servers {
+        let value = toml::Value::try_from(mcp_servers)
+            .map_err(|e| Error::Other(format!("TOML conversion: {e}")))?;
+        table.insert("mcp_servers".into(), value);
+    }
+
+    Ok(table)
 }
 
 /// Resolve the effective system prompt: `system_prompt_file` takes precedence
@@ -373,7 +439,7 @@ mod tests {
         assert!(env.contains_key("CODEX_HOME"));
         let tmp = tmp_dir.unwrap();
 
-        let config_path = tmp.path().join(".codex/config.toml");
+        let config_path = tmp.path().join("config.toml");
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("[mcp_servers.test]"));
         assert!(content.contains("test-server"));
@@ -391,7 +457,7 @@ mod tests {
         assert!(env.contains_key("CODEX_HOME"));
         let tmp = tmp_dir.unwrap();
 
-        let config_path = tmp.path().join(".codex/config.toml");
+        let config_path = tmp.path().join("config.toml");
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("instructions"));
         assert!(content.contains("You are helpful."));
@@ -407,6 +473,95 @@ mod tests {
         let (env, tmp_dir) = write_configs(&opts).await.unwrap();
         assert!(env.is_empty());
         assert!(tmp_dir.is_none());
+    }
+
+    #[test]
+    fn merge_config_preserves_existing_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"model = "o3"
+
+[mcp_servers.preexisting]
+command = "old-server"
+
+[other_table]
+foo = "bar"
+"#,
+        )
+        .unwrap();
+
+        let mut servers = HashMap::new();
+        servers.insert(
+            "test".into(),
+            CodexMcpServer {
+                command: Some("test-server".into()),
+                args: None,
+                env: None,
+                cwd: None,
+                tool_timeout_sec: None,
+            },
+        );
+
+        let config = CodexConfig {
+            instructions: Some("hello".into()),
+            mcp_servers: Some(servers),
+        };
+
+        let merged = merge_config(Some(&path), config).unwrap();
+
+        assert_eq!(merged.get("model").and_then(|v| v.as_str()), Some("o3"));
+        assert!(merged.get("other_table").is_some());
+        assert_eq!(
+            merged.get("instructions").and_then(|v| v.as_str()),
+            Some("hello")
+        );
+        // mcp_servers replaced wholesale — pre-existing entries are dropped
+        // in favor of the caller-supplied set, which is the documented behavior.
+        let mcp = merged.get("mcp_servers").and_then(|v| v.as_table()).unwrap();
+        assert!(mcp.contains_key("test"));
+        assert!(!mcp.contains_key("preexisting"));
+    }
+
+    #[test]
+    fn merge_config_no_existing_file() {
+        let merged = merge_config(
+            None,
+            CodexConfig {
+                instructions: Some("hi".into()),
+                mcp_servers: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            merged.get("instructions").and_then(|v| v.as_str()),
+            Some("hi")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_home_skips_config_and_symlinks_rest() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("config.toml"), "model = \"old\"").unwrap();
+        std::fs::write(src.path().join("auth.json"), "{\"token\":\"x\"}").unwrap();
+        std::fs::create_dir(src.path().join("sessions")).unwrap();
+        std::fs::write(src.path().join("sessions").join("a.jsonl"), "{}").unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        link_codex_home_contents(src.path(), dst.path()).unwrap();
+
+        assert!(!dst.path().join("config.toml").exists());
+        let auth = dst.path().join("auth.json");
+        assert!(auth.exists());
+        assert!(auth.symlink_metadata().unwrap().file_type().is_symlink());
+        let sessions = dst.path().join("sessions");
+        assert!(sessions.symlink_metadata().unwrap().file_type().is_symlink());
+        // Reading through the symlink reaches the original file.
+        let contents =
+            std::fs::read_to_string(dst.path().join("sessions").join("a.jsonl")).unwrap();
+        assert_eq!(contents, "{}");
     }
 
     #[tokio::test]
@@ -428,7 +583,7 @@ mod tests {
         assert!(env.contains_key("CODEX_HOME"));
         let tmp = tmp_dir.unwrap();
 
-        let config_path = tmp.path().join(".codex/config.toml");
+        let config_path = tmp.path().join("config.toml");
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("File prompt content"));
         assert!(!content.contains("Inline prompt"));

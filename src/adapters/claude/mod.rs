@@ -40,6 +40,11 @@ impl CliAdapter for ClaudeAdapter {
                 binary: &binary,
                 args: &args,
                 extra_env: &extra_env,
+                // Strip Anthropic API auth env vars so the CLI uses its own
+                // subscription credentials (OAuth/keychain). Without this, a
+                // user's shell `ANTHROPIC_API_KEY` would silently bill API
+                // tokens instead of using the Claude Code subscription.
+                strip_env: &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
                 cwd: opts.cwd.as_deref().unwrap_or("."),
                 max_bytes,
                 cancel: &cancel,
@@ -142,6 +147,18 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
                 args.push("--agents".into());
                 args.push(json);
             }
+        }
+        if let Some(sources) = &co.setting_sources {
+            // `--setting-sources <comma-list>` — empty list loads nothing
+            // (skips user/project/local settings and their SessionStart hooks).
+            args.push("--setting-sources".into());
+            args.push(
+                sources
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
         }
     }
 
@@ -290,5 +307,58 @@ mod tests {
         let args = build_args(&opts);
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(args.contains(&"bypassPermissions".to_string()));
+    }
+
+    #[test]
+    fn build_args_setting_sources_omitted_by_default() {
+        let opts = RunOptions {
+            task: "hello".into(),
+            ..Default::default()
+        };
+        let args = build_args(&opts);
+        assert!(!args.contains(&"--setting-sources".to_string()));
+    }
+
+    #[test]
+    fn build_args_setting_sources_empty_loads_none() {
+        let opts = RunOptions {
+            task: "hello".into(),
+            providers: Some(crate::types::ProviderOptions {
+                claude: Some(crate::types::ClaudeOptions {
+                    setting_sources: Some(vec![]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let args = build_args(&opts);
+        let idx = args
+            .iter()
+            .position(|a| a == "--setting-sources")
+            .expect("flag emitted");
+        assert_eq!(args[idx + 1], "");
+    }
+
+    #[test]
+    fn build_args_setting_sources_subset() {
+        use crate::types::SettingSource;
+        let opts = RunOptions {
+            task: "hello".into(),
+            providers: Some(crate::types::ProviderOptions {
+                claude: Some(crate::types::ClaudeOptions {
+                    setting_sources: Some(vec![SettingSource::Project, SettingSource::Local]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let args = build_args(&opts);
+        let idx = args
+            .iter()
+            .position(|a| a == "--setting-sources")
+            .expect("flag emitted");
+        assert_eq!(args[idx + 1], "project,local");
     }
 }

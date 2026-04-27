@@ -51,6 +51,7 @@ impl CliAdapter for GeminiAdapter {
                 binary: &binary,
                 args: &cli_args,
                 extra_env: &extra_env,
+                strip_env: &[],
                 cwd: effective_cwd,
                 max_bytes,
                 cancel: &cancel,

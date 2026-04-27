@@ -90,6 +90,9 @@ pub(crate) struct SpawnParams<'a> {
     pub binary: &'a str,
     pub args: &'a [String],
     pub extra_env: &'a HashMap<String, String>,
+    /// Keys to remove from the inherited parent env before applying `extra_env`.
+    /// Used to prevent leaks like `ANTHROPIC_API_KEY` overriding subscription auth.
+    pub strip_env: &'a [&'static str],
     pub cwd: &'a str,
     pub max_bytes: usize,
     pub cancel: &'a tokio_util::sync::CancellationToken,
@@ -110,6 +113,7 @@ pub(crate) async fn spawn_and_stream(
         binary,
         args,
         extra_env,
+        strip_env,
         cwd,
         max_bytes,
         cancel,
@@ -117,8 +121,11 @@ pub(crate) async fn spawn_and_stream(
     debug!(cli = cli_label, binary = %binary, args = ?args, "spawning CLI");
 
     let mut cmd = Command::new(binary);
-    cmd.args(args)
-        .envs(extra_env)
+    cmd.args(args);
+    for key in strip_env {
+        cmd.env_remove(key);
+    }
+    cmd.envs(extra_env)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
