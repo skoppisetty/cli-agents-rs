@@ -156,6 +156,11 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
         args.push("--skip-git-repo-check".into());
     }
 
+    // User-supplied flags last, so callers can override earlier defaults.
+    if let Some(extra) = codex_opts.and_then(|c| c.extra_args.as_ref()) {
+        args.extend(extra.iter().cloned());
+    }
+
     args
 }
 
@@ -587,5 +592,69 @@ foo = "bar"
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("File prompt content"));
         assert!(!content.contains("Inline prompt"));
+    }
+
+    #[test]
+    fn build_args_extra_args_omitted_by_default() {
+        let opts = RunOptions {
+            task: "hello".into(),
+            ..Default::default()
+        };
+        let args = build_args(&opts);
+        assert!(!args.iter().any(|a| a == "--proto"));
+    }
+
+    #[test]
+    fn build_args_extra_args_appended_verbatim() {
+        let opts = RunOptions {
+            task: "hello".into(),
+            providers: Some(crate::types::ProviderOptions {
+                codex: Some(crate::types::CodexOptions {
+                    extra_args: Some(vec!["--proto".into(), "json".into()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let args = build_args(&opts);
+        let idx = args
+            .iter()
+            .position(|a| a == "--proto")
+            .expect("extra_args flag emitted");
+        assert_eq!(args[idx + 1], "json");
+    }
+
+    #[test]
+    fn build_args_extra_args_come_after_crate_defaults() {
+        // Callers should be able to override what this crate emits — same
+        // contract as the Claude adapter. User-supplied flags land last.
+        let opts = RunOptions {
+            task: "hello".into(),
+            skip_permissions: true,
+            providers: Some(crate::types::ProviderOptions {
+                codex: Some(crate::types::CodexOptions {
+                    extra_args: Some(vec!["--skip-git-repo-check".into()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let args = build_args(&opts);
+        // The crate emits --skip-git-repo-check once for skip_permissions,
+        // then the user's extra copy. The user copy must be strictly later.
+        let positions: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| (a == "--skip-git-repo-check").then_some(i))
+            .collect();
+        assert_eq!(
+            positions.len(),
+            2,
+            "both crate-emitted and user-supplied copies expected, got {args:?}"
+        );
+        // Last occurrence is the user-supplied one.
+        assert!(positions[1] > positions[0]);
     }
 }

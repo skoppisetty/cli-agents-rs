@@ -97,6 +97,13 @@ pub struct ClaudeOptions {
     /// `None` = let the CLI default (loads user/project/local).
     /// `Some(vec![])` = load nothing — silences global SessionStart hooks.
     pub setting_sources: Option<Vec<SettingSource>>,
+    /// Extra arguments appended verbatim to the Claude CLI invocation.
+    ///
+    /// Useful for flags this crate does not model explicitly — for example
+    /// `--json-schema <schema>` to force structured output, or
+    /// `--input-format text`. Order is preserved; entries are appended after
+    /// all flags this crate emits, so they can override earlier defaults.
+    pub extra_args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -107,6 +114,12 @@ pub struct CodexOptions {
     pub additional_directories: Option<Vec<String>>,
     pub images: Option<Vec<String>>,
     pub output_schema: Option<String>,
+    /// Extra arguments appended verbatim to the Codex CLI invocation.
+    ///
+    /// Same semantics as the Claude / Gemini equivalents — pass any flags
+    /// this crate doesn't model. Appended last, so they can override earlier
+    /// defaults.
+    pub extra_args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

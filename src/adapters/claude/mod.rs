@@ -185,6 +185,12 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
         args.push("--dangerously-skip-permissions".into());
     }
 
+    // User-supplied flags last, so callers can override earlier defaults
+    // (e.g. force `--output-format text` or pass `--json-schema <schema>`).
+    if let Some(extra) = claude_opts.and_then(|c| c.extra_args.as_ref()) {
+        args.extend(extra.iter().cloned());
+    }
+
     args
 }
 
@@ -360,5 +366,74 @@ mod tests {
             .position(|a| a == "--setting-sources")
             .expect("flag emitted");
         assert_eq!(args[idx + 1], "project,local");
+    }
+
+    #[test]
+    fn build_args_extra_args_omitted_by_default() {
+        let opts = RunOptions {
+            task: "hello".into(),
+            ..Default::default()
+        };
+        let args = build_args(&opts);
+        // Nothing about extra_args should appear when the option is unset.
+        assert!(!args.iter().any(|a| a == "--json-schema"));
+    }
+
+    #[test]
+    fn build_args_extra_args_appended_verbatim() {
+        let opts = RunOptions {
+            task: "hello".into(),
+            providers: Some(crate::types::ProviderOptions {
+                claude: Some(crate::types::ClaudeOptions {
+                    extra_args: Some(vec!["--json-schema".into(), "{\"type\":\"object\"}".into()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let args = build_args(&opts);
+        let idx = args
+            .iter()
+            .position(|a| a == "--json-schema")
+            .expect("extra_args flag emitted");
+        // Adjacent, in order — `args.extend` preserves both.
+        assert_eq!(args[idx + 1], "{\"type\":\"object\"}");
+    }
+
+    #[test]
+    fn build_args_extra_args_come_after_crate_defaults() {
+        // Callers should be able to override what this crate emits — e.g.
+        // re-pin `--output-format` to `text` even though we default to
+        // stream-json. That only works if user-supplied flags land last.
+        let opts = RunOptions {
+            task: "hello".into(),
+            skip_permissions: true,
+            providers: Some(crate::types::ProviderOptions {
+                claude: Some(crate::types::ClaudeOptions {
+                    extra_args: Some(vec!["--output-format".into(), "text".into()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let args = build_args(&opts);
+        // The crate emits `--output-format stream-json` early; the user
+        // override must appear strictly after the permission-bypass block
+        // (the last thing the crate emits).
+        let user_idx = args
+            .iter()
+            .rposition(|a| a == "--output-format")
+            .expect("user --output-format emitted");
+        let bypass_idx = args
+            .iter()
+            .position(|a| a == "--dangerously-skip-permissions")
+            .expect("skip_permissions flag emitted");
+        assert!(
+            user_idx > bypass_idx,
+            "user extra_args must be appended last so they win over crate defaults"
+        );
+        assert_eq!(args[user_idx + 1], "text");
     }
 }
