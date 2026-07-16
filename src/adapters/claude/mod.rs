@@ -1,11 +1,11 @@
 mod parse;
 
+use crate::DEFAULT_MAX_OUTPUT_BYTES;
 use crate::adapters::CliAdapter;
 use crate::discovery::discover_binary;
 use crate::error::{Error, Result};
 use crate::events::StreamEvent;
 use crate::types::{CliName, RunOptions, RunResult};
-use crate::DEFAULT_MAX_OUTPUT_BYTES;
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 

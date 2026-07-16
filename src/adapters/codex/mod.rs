@@ -1,11 +1,11 @@
 mod parse;
 
+use crate::DEFAULT_MAX_OUTPUT_BYTES;
 use crate::adapters::CliAdapter;
 use crate::discovery::discover_binary;
 use crate::error::{Error, Result};
 use crate::events::StreamEvent;
 use crate::types::{CliName, RunOptions, RunResult};
-use crate::DEFAULT_MAX_OUTPUT_BYTES;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -524,7 +524,10 @@ foo = "bar"
         );
         // mcp_servers replaced wholesale — pre-existing entries are dropped
         // in favor of the caller-supplied set, which is the documented behavior.
-        let mcp = merged.get("mcp_servers").and_then(|v| v.as_table()).unwrap();
+        let mcp = merged
+            .get("mcp_servers")
+            .and_then(|v| v.as_table())
+            .unwrap();
         assert!(mcp.contains_key("test"));
         assert!(!mcp.contains_key("preexisting"));
     }
@@ -562,7 +565,13 @@ foo = "bar"
         assert!(auth.exists());
         assert!(auth.symlink_metadata().unwrap().file_type().is_symlink());
         let sessions = dst.path().join("sessions");
-        assert!(sessions.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(
+            sessions
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         // Reading through the symlink reaches the original file.
         let contents =
             std::fs::read_to_string(dst.path().join("sessions").join("a.jsonl")).unwrap();
