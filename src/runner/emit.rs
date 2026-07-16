@@ -167,10 +167,12 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    fn event_collector() -> (
+    type EventCollector = (
         Arc<dyn Fn(StreamEvent) + Send + Sync>,
         Arc<Mutex<Vec<StreamEvent>>>,
-    ) {
+    );
+
+    fn event_collector() -> EventCollector {
         let events = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
         let cb: Arc<dyn Fn(StreamEvent) + Send + Sync> = Arc::new(move |e: StreamEvent| {

@@ -225,7 +225,7 @@ pub(crate) fn extract_error_message(stderr: Option<&str>) -> Option<String> {
                 || lower.contains("denied")
                 || lower.contains("unauthorized")
         })
-        .or_else(|| stderr.lines().filter(|l| !l.is_empty()).last());
+        .or_else(|| stderr.lines().rfind(|l| !l.is_empty()));
     msg.map(|s| s.trim().to_string())
 }
 
