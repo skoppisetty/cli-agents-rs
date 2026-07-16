@@ -239,7 +239,7 @@ mod tests {
 
         // Sorting: newer versions should come first
         let mut versions = vec!["v18.17.1", "v22.0.0", "v20.11.0"];
-        versions.sort_by(|a, b| parse_ver(b).cmp(&parse_ver(a)));
+        versions.sort_by_key(|v| std::cmp::Reverse(parse_ver(v)));
         assert_eq!(versions, vec!["v22.0.0", "v20.11.0", "v18.17.1"]);
     }
 
