@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.12
+
+### Added
+- `RunResult::signal` — the signal that terminated the CLI process, when one did (unix only). `Some(9)` is the usual shape of an out-of-memory kill, a case that is otherwise invisible: a signalled process writes no stderr and emits no final event, so previously the only trace was a fabricated exit code.
+- A signalled run with no other output now gets a readable `text` (e.g. "The agent was killed (SIGKILL), most often by the system reclaiming memory.") instead of nothing.
+
+### Fixed
+- **`RunResult::exit_code` no longer fabricates `1` for a process that was terminated by a signal.** `spawn_and_stream` finished with `status.code().unwrap_or(1)`, so a SIGKILL was indistinguishable from a CLI that cleanly exited 1 — and since `exit_code` is an `Option` precisely to express "no code", the substitution destroyed the only channel that could have carried the difference. A consumer seeing `exit_code: Some(1)` would go looking for an explanation in a stderr the killed process never got a chance to write. It is now `None` when a signal ended the run, with the signal itself reported alongside.
+
+### Notes
+- `RunResult` is `#[non_exhaustive]` and derives `Default`, so the new field is additive for downstream consumers.
+- Read `success` first, then `text`, and consult `signal` before attributing anything to `exit_code`: a CLI that reports failure through its own event stream can still exit 0.
+
 ## 0.2.11
 
 ### Added

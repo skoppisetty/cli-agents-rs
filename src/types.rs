@@ -207,7 +207,20 @@ pub struct RunOptions {
 pub struct RunResult {
     pub success: bool,
     pub text: Option<String>,
+    /// The process's exit status — `None` when a SIGNAL ended it, or when the
+    /// run never reached a process at all (cancellation).
+    ///
+    /// Do NOT read this as a diagnosis on its own: a CLI that reports failure
+    /// through its own event stream can exit 0, and in earlier versions a
+    /// signalled process was reported here as `1`. Prefer `success`, then
+    /// `text`, and consult `signal` before blaming the code.
     pub exit_code: Option<i32>,
+    /// The signal that terminated the process, when one did. Unix only.
+    ///
+    /// `Some(9)` is the usual shape of an out-of-memory kill — the case that is
+    /// otherwise invisible, because a signalled process writes no stderr and
+    /// emits no final event.
+    pub signal: Option<i32>,
     pub stats: Option<RunStats>,
     pub session_id: Option<String>,
     pub stderr: Option<String>,
