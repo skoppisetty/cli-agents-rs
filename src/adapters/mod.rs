@@ -10,8 +10,13 @@ use crate::error::{Error, Result};
 use crate::events::StreamEvent;
 use crate::types::{CliName, RunOptions, RunResult};
 use std::collections::HashMap;
+use process_wrap::tokio::TokioChildWrapper;
+use process_wrap::tokio::TokioCommandWrap;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tracing::{debug, warn};
 
 /// Trait implemented by each CLI adapter.
@@ -129,38 +134,42 @@ pub(crate) async fn spawn_and_stream(
     } = params;
     debug!(cli = cli_label, binary = %binary, args = ?args, "spawning CLI");
 
-    let mut cmd = Command::new(binary);
-    cmd.args(args);
-    for key in strip_env {
-        cmd.env_remove(key);
-    }
-    cmd.envs(extra_env)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-
-    #[cfg(unix)]
-    {
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setpgid(0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+    // ── The child owns a KILL GROUP, on every platform ──
+    //
+    // Cancelling a run has to take the whole tree, not just the process we
+    // spawned: `claude` is a launcher, and the work happens in node processes
+    // below it. Killing only the parent orphans those — they keep running, keep
+    // holding the model session, and keep writing to a pipe nobody reads.
+    //
+    // This used to be `pre_exec(setpgid)` plus `libc::killpg(SIGKILL)`, which is
+    // correct on unix and does not exist on Windows — where the equivalent is a
+    // Job Object, a completely different mechanism with the same purpose.
+    // `process-wrap` is that difference, already written and tested: the unix
+    // arm is the same process-group call, and the Windows arm assigns the child
+    // to a job that dies with it.
+    let mut wrap = TokioCommandWrap::with_new(binary, |cmd| {
+        cmd.args(args);
+        for key in strip_env {
+            cmd.env_remove(key);
         }
-    }
+        cmd.envs(extra_env)
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+    });
+    #[cfg(unix)]
+    wrap.wrap(ProcessGroup::leader());
+    #[cfg(windows)]
+    wrap.wrap(JobObject);
 
-    let mut child = cmd
+    let mut child = wrap
         .spawn()
         .map_err(|e| Error::Process(format!("failed to spawn {cli_label}: {e}")))?;
 
-    let child_pid = child.id();
-
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take().expect("stderr piped");
+    let stdout = child.stdout().take().expect("stdout piped");
+    let stderr = child.stderr().take().expect("stderr piped");
 
     let stderr_handle = tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
@@ -183,7 +192,7 @@ pub(crate) async fn spawn_and_stream(
                         total_bytes += n;
                         if total_bytes > max_bytes {
                             warn!(cli = cli_label, total_bytes, max_bytes, "output exceeded max buffer size");
-                            kill_process_group(&mut child, child_pid).await;
+                            kill_process_group(&mut child).await;
                             return Err(Error::Process(format!(
                                 "output exceeded max buffer size ({max_bytes} bytes)"
                             )));
@@ -197,13 +206,13 @@ pub(crate) async fn spawn_and_stream(
                 }
             }
             _ = cancel.cancelled() => {
-                kill_process_group(&mut child, child_pid).await;
+                kill_process_group(&mut child).await;
                 return Ok(SpawnOutcome::Cancelled);
             }
         }
     }
 
-    let status = child.wait().await.map_err(Error::Io)?;
+    let status = Box::into_pin(child.wait()).await.map_err(Error::Io)?;
     // `code()` is `None` for a signalled process. This used to be
     // `.unwrap_or(1)`, which reported a SIGKILL as a clean `exit 1` and left
     // callers with no way to recover the difference — the exact ambiguity that
@@ -267,21 +276,84 @@ pub(crate) fn extract_error_message(stderr: Option<&str>) -> Option<String> {
     msg.map(|s| s.trim().to_string())
 }
 
-async fn kill_process_group(child: &mut tokio::process::Child, pid: Option<u32>) {
-    #[cfg(unix)]
-    {
-        if let Some(pid) = pid {
-            unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
-    }
-    let _ = child.kill().await;
+/// Kill the child AND everything it spawned.
+///
+/// `TokioChildWrapper::kill` dispatches to whichever group mechanism was wrapped
+/// on at spawn — the process group on unix, the Job Object on Windows — so the
+/// `#[cfg]` that used to live here is gone. It returns a boxed future, hence the
+/// pin.
+async fn kill_process_group(child: &mut Box<dyn TokioChildWrapper>) {
+    let _ = Box::into_pin(child.kill()).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CANCELLING TAKES THE WHOLE TREE, not just the process we spawned.
+    ///
+    /// This is the contract `setpgid`/`killpg` existed to provide, and it had no
+    /// test — so the swap to `process-wrap` would have been unverifiable, and so
+    /// would any future change to it. It matters because `claude` is a
+    /// launcher: the work runs in node processes underneath. Killing only the
+    /// parent leaves those alive, holding a model session, writing to a pipe
+    /// nobody is reading.
+    ///
+    /// HOW IT PROVES IT WITHOUT TIMING GAMES: the shell writes a marker file,
+    /// spawns a grandchild that would DELETE that file after a delay, then
+    /// sleeps. Cancel immediately. If the group died, the grandchild never runs
+    /// and the marker survives. If only the parent died, the orphan wakes up and
+    /// removes it. The assertion is on a filesystem fact, not on a pid still
+    /// being enumerable, which is what makes it honest on both platforms.
+    ///
+    /// Unix-only for now: it needs a shell that can background a process, and
+    /// the Windows equivalent (`cmd /c start`) has different semantics worth
+    /// writing deliberately rather than transliterating. The Job Object path is
+    /// exercised by CI compiling this file for Windows; that it KILLS the tree
+    /// there is not yet proved. Marked plainly rather than assumed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_kills_the_grandchild_not_just_the_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("survivor");
+        std::fs::write(&marker, "alive").unwrap();
+
+        // Grandchild removes the marker after 3s; parent then sleeps 10s.
+        let script = format!("(sleep 3; rm -f '{}') & sleep 10", marker.display());
+        let args = vec!["-c".to_string(), script];
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let token = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            token.cancel();
+        });
+
+        let outcome = spawn_and_stream(
+            SpawnParams {
+                cli_label: "test",
+                binary: "sh",
+                args: &args,
+                extra_env: &HashMap::new(),
+                strip_env: &[],
+                cwd: dir.path().to_str().unwrap(),
+                max_bytes: 1024,
+                cancel: &cancel,
+            },
+            |_: &str| {},
+        )
+        .await
+        .expect("spawn");
+
+        assert!(matches!(outcome, SpawnOutcome::Cancelled), "run was cancelled");
+
+        // Past when the grandchild would have deleted it, had it survived.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        assert!(
+            marker.exists(),
+            "the grandchild outlived cancellation and deleted the marker — the kill did not reach the process group"
+        );
+    }
 
     /// A process that ends by SIGNAL has no exit code, and says so.
     ///

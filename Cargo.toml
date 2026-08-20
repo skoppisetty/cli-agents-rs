@@ -23,8 +23,20 @@ tempfile = "3"
 clap = { version = "4", features = ["derive"], optional = true }
 toml = "1.1"
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+# Cross-platform binary discovery. Replaces a `Command::new("which")`
+# shell-out that does not exist on Windows — and, more importantly, applies
+# PATHEXT there, so an npm-installed `claude` resolves to `claude.cmd` rather
+# than the extensionless bash shim npm also writes, which Windows cannot run.
+which = "8"
+
+# Home directory, resolved per-platform. `std::env::var("HOME")` is empty on
+# Windows, where the variable is USERPROFILE. This is the crate cargo itself
+# uses.
+home = "0.5"
+process-wrap = { version = "8.2.1", features = ["tokio1"] }
+
+# NO `libc`. The only thing it was used for was `setpgid`/`killpg` in
+# `adapters/mod.rs`, which `process-wrap` now does on both platforms.
 
 [features]
 default = []
