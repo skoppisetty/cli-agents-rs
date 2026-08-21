@@ -63,7 +63,9 @@ impl CliAdapter for ClaudeAdapter {
                 exit_code,
                 signal,
                 stderr,
+                dropped_lines,
             } => {
+                crate::adapters::warn_dropped_lines(dropped_lines, max_bytes, emit);
                 let success = state.success.unwrap_or(exit_code == Some(0));
                 // When the agent fails with no text, surface the error from
                 // stderr so consumers always have something to show the user —

@@ -97,7 +97,12 @@ fn find_nvm_binary(binary: &str) -> Option<String> {
 
     // Sort descending by semver (newest first).
     versions.sort_by(|a, b| {
-        let name_of = |p: &Path| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name_of = |p: &Path| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        };
         parse_nvm_version(&name_of(b)).cmp(&parse_nvm_version(&name_of(a)))
     });
 
@@ -143,11 +148,7 @@ const HOME_RELATIVE_PATHS: &[&str] = &[".local/bin", ".bun/bin", ".npm-global/bi
 /// `%APPDATA%` and nvm-windows both sit under the user profile, which is what
 /// `home::home_dir()` returns here.
 #[cfg(windows)]
-const HOME_RELATIVE_PATHS: &[&str] = &[
-    "AppData/Roaming/npm",
-    "AppData/Roaming/nvm",
-    ".bun/bin",
-];
+const HOME_RELATIVE_PATHS: &[&str] = &["AppData/Roaming/npm", "AppData/Roaming/nvm", ".bun/bin"];
 
 const CLAUDE_EXTRA_PATHS: &[&str] = &[".claude/local/claude"];
 
@@ -349,7 +350,10 @@ mod tests {
     #[test]
     fn path_lookup_works_on_every_platform() {
         let found = which_on_path("cargo").expect("cargo is on PATH wherever cargo test runs");
-        assert!(Path::new(&found).is_file(), "resolved to a real file: {found}");
+        assert!(
+            Path::new(&found).is_file(),
+            "resolved to a real file: {found}"
+        );
         assert!(which_on_path("definitely-not-a-real-binary-xyz").is_none());
     }
 

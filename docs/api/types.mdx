@@ -62,7 +62,7 @@ pub struct RunOptions {
 | `env` | `None` | Extra environment variables for the CLI process |
 | `executable_path` | `None` | Explicit path to the CLI binary (skips discovery — requires `cli` to be set) |
 | `resume_session_id` | `None` | Session ID to resume a previous conversation |
-| `max_output_bytes` | 10 MB | Max stdout buffer before aborting |
+| `max_output_bytes` | 10 MB | Per-line stdout retention cap; oversized lines are dropped, the run continues |
 | `skip_permissions` | `false` | Bypass CLI permission prompts |
 | `providers` | `None` | Provider-specific options |
 

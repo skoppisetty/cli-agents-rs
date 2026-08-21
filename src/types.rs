@@ -180,10 +180,13 @@ pub struct RunOptions {
     /// Session ID to resume a previous conversation.
     pub resume_session_id: Option<String>,
 
-    /// Maximum bytes to buffer from CLI stdout before aborting.
+    /// Maximum bytes a single stdout LINE may retain in memory.
     ///
-    /// Prevents OOM if the CLI produces unexpectedly large output.
-    /// Defaults to 10 MB when `None`.
+    /// Not a cumulative cap: streamed output is handed to the consumer
+    /// line-by-line and never held, so total volume is unbounded by design —
+    /// a long agent run is not an error. A line over the cap is dropped and
+    /// surfaced as a warning event; the run continues. Defaults to 10 MB
+    /// when `None`.
     pub max_output_bytes: Option<usize>,
 
     /// Skip permission prompts and run in fully autonomous mode.

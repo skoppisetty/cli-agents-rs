@@ -42,10 +42,12 @@ pub mod events;
 pub mod runner;
 pub mod types;
 
-/// Default max stdout buffer size: 10 MB.
+/// Default per-LINE stdout retention cap: 10 MB.
 ///
-/// Shared across all adapters to prevent OOM if a CLI produces unexpectedly
-/// large output. Override per-run via [`RunOptions::max_output_bytes`].
+/// Bounds what a single stdout line may retain in memory — not cumulative
+/// throughput, which is streamed through and never held. A line over the cap
+/// is dropped (and surfaced as a warning event); the run continues. Override
+/// per-run via [`RunOptions::max_output_bytes`].
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 
 // Re-export primary API

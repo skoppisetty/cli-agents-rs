@@ -67,7 +67,9 @@ impl CliAdapter for CodexAdapter {
                 exit_code,
                 signal,
                 stderr,
+                dropped_lines,
             } => {
+                crate::adapters::warn_dropped_lines(dropped_lines, max_bytes, emit);
                 let success = !state.failed && exit_code == Some(0);
                 let text = if !success && state.result_text.is_none() {
                     crate::adapters::extract_error_message(stderr.as_deref())

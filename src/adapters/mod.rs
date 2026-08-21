@@ -9,13 +9,13 @@ pub use gemini::GeminiAdapter;
 use crate::error::{Error, Result};
 use crate::events::StreamEvent;
 use crate::types::{CliName, RunOptions, RunResult};
-use std::collections::HashMap;
-use process_wrap::tokio::TokioChildWrapper;
-use process_wrap::tokio::TokioCommandWrap;
-#[cfg(unix)]
-use process_wrap::tokio::ProcessGroup;
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::TokioChildWrapper;
+use process_wrap::tokio::TokioCommandWrap;
+use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{debug, warn};
 
@@ -93,6 +93,11 @@ pub(crate) enum SpawnOutcome {
         /// always `None` elsewhere.
         signal: Option<i32>,
         stderr: Option<String>,
+        /// How many stdout lines exceeded `max_bytes` and were dropped.
+        ///
+        /// A dropped line is a lost EVENT, not a lost run — adapters surface
+        /// this as a warning so the loss is never silent.
+        dropped_lines: u64,
     },
     /// Process was cancelled via the cancellation token.
     Cancelled,
@@ -171,33 +176,52 @@ pub(crate) async fn spawn_and_stream(
     let stdout = child.stdout().take().expect("stdout piped");
     let stderr = child.stderr().take().expect("stderr piped");
 
+    // stderr is retained as a bounded TAIL. It exists so a failed run can be
+    // explained (`extract_error_message` reads it), and the parting words are
+    // at the end — a chatty CLI logging megabytes must not be held in full
+    // for that. Chunked reads, not lines: a single unterminated line cannot
+    // grow the buffer past the bound either.
     let stderr_handle = tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr);
-        let mut buf = String::new();
-        while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {}
-        buf
+        use tokio::io::AsyncReadExt;
+        let mut stderr = stderr;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match stderr.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.len() > STDERR_TAIL_BYTES * 2 {
+                        buf.drain(..buf.len() - STDERR_TAIL_BYTES);
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
     });
 
+    // `max_bytes` bounds what a single LINE may retain — not cumulative
+    // throughput. Every line is handed to `on_line` and released, so the
+    // total streamed volume never lives in memory; a cumulative cap here
+    // used to KILL a healthy long run at the 10MB mark and discard the
+    // whole turn it was carrying. A line that will not fit is consumed to
+    // its newline, dropped, and counted; the run continues.
     let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    let mut total_bytes: usize = 0;
+    let mut line_buf: Vec<u8> = Vec::new();
+    let mut dropped_lines: u64 = 0;
 
     loop {
-        line.clear();
+        line_buf.clear();
         tokio::select! {
-            result = reader.read_line(&mut line) => {
+            result = read_line_capped(&mut reader, &mut line_buf, max_bytes) => {
                 match result {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        total_bytes += n;
-                        if total_bytes > max_bytes {
-                            warn!(cli = cli_label, total_bytes, max_bytes, "output exceeded max buffer size");
-                            kill_process_group(&mut child).await;
-                            return Err(Error::Process(format!(
-                                "output exceeded max buffer size ({max_bytes} bytes)"
-                            )));
-                        }
-                        on_line(line.trim());
+                    Ok(CappedLine::Eof) => break,
+                    Ok(CappedLine::Line { dropped: true }) => {
+                        dropped_lines += 1;
+                        warn!(cli = cli_label, max_bytes, "dropped a stdout line larger than the retention cap");
+                    }
+                    Ok(CappedLine::Line { dropped: false }) => {
+                        on_line(String::from_utf8_lossy(&line_buf).trim());
                     }
                     Err(e) => {
                         warn!(cli = cli_label, error = %e, "error reading stdout");
@@ -233,7 +257,89 @@ pub(crate) async fn spawn_and_stream(
         } else {
             Some(stderr_text)
         },
+        dropped_lines,
     })
+}
+
+/// How much stderr is retained (as a tail — see the reader above).
+const STDERR_TAIL_BYTES: usize = 64 * 1024;
+
+/// Outcome of one capped line read.
+enum CappedLine {
+    /// A complete line is in the buffer — unless `dropped`, in which case the
+    /// line exceeded the cap, the buffer is empty, and the line is gone.
+    Line { dropped: bool },
+    /// End of stream.
+    Eof,
+}
+
+/// Read one `\n`-terminated line, retaining at most `cap` bytes of it.
+///
+/// A line that will not fit is not truncated-and-delivered — a cut JSONL
+/// event is garbage to every parser downstream — it is consumed to its
+/// newline, discarded, and reported as `dropped`. Memory stays bounded by
+/// `cap` plus the reader's own buffer, no matter what the child writes.
+async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<CappedLine> {
+    let mut dropped = false;
+    loop {
+        let (consumed, line_complete) = {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                // EOF — a final unterminated line still counts as a line.
+                return Ok(if buf.is_empty() && !dropped {
+                    CappedLine::Eof
+                } else {
+                    CappedLine::Line { dropped }
+                });
+            }
+            match available.iter().position(|&b| b == b'\n') {
+                Some(newline) => {
+                    if !dropped {
+                        if buf.len() + newline <= cap {
+                            buf.extend_from_slice(&available[..newline]);
+                        } else {
+                            dropped = true;
+                            buf.clear();
+                        }
+                    }
+                    (newline + 1, true)
+                }
+                None => {
+                    let n = available.len();
+                    if !dropped {
+                        if buf.len() + n <= cap {
+                            buf.extend_from_slice(available);
+                        } else {
+                            dropped = true;
+                            buf.clear();
+                        }
+                    }
+                    (n, false)
+                }
+            }
+        };
+        reader.consume(consumed);
+        if line_complete {
+            return Ok(CappedLine::Line { dropped });
+        }
+    }
+}
+
+/// The loss a dropped line represents must reach the consumer, not just the
+/// log — every adapter calls this after its spawn completes.
+pub(crate) fn warn_dropped_lines(dropped_lines: u64, max_bytes: usize, emit: &dyn Fn(StreamEvent)) {
+    if dropped_lines > 0 {
+        emit(StreamEvent::Error {
+            message: format!(
+                "{dropped_lines} output line(s) exceeded the {max_bytes}-byte retention cap and were dropped"
+            ),
+            severity: Some(crate::events::Severity::Warning),
+        });
+    }
 }
 
 /// A sentence for a process that died without writing one.
@@ -345,7 +451,10 @@ mod tests {
         .await
         .expect("spawn");
 
-        assert!(matches!(outcome, SpawnOutcome::Cancelled), "run was cancelled");
+        assert!(
+            matches!(outcome, SpawnOutcome::Cancelled),
+            "run was cancelled"
+        );
 
         // Past when the grandchild would have deleted it, had it survived.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -437,5 +546,128 @@ mod tests {
         assert!(describe_signal(Some(15)).unwrap().contains("SIGTERM"));
         assert!(describe_signal(Some(42)).unwrap().contains("42"));
         assert_eq!(describe_signal(None), None);
+    }
+
+    /// A LONG RUN IS NOT AN ERROR. `max_bytes` used to count cumulative
+    /// throughput and KILL the process when the total crossed it — but every
+    /// line is handed to `on_line` and dropped, so the total was never held in
+    /// memory at all. A 30-minute agent run streaming tens of MB of tool
+    /// events died at the 10MB mark with its entire turn discarded, which is
+    /// how CueFrame's Director lost long turns in production. The cap bounds
+    /// what a single line may RETAIN; the run itself must complete.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn total_output_beyond_max_bytes_streams_through_and_completes() {
+        // 200 lines × ~100 bytes ≈ 20 KB through a 1 KB cap.
+        let script = "i=0; while [ $i -lt 200 ]; do printf '%0100d\\n' $i; i=$((i+1)); done";
+        let args = vec!["-c".to_string(), script.to_string()];
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut lines = 0u32;
+        let outcome = spawn_and_stream(
+            SpawnParams {
+                cli_label: "test",
+                binary: "sh",
+                args: &args,
+                extra_env: &HashMap::new(),
+                strip_env: &[],
+                cwd: ".",
+                max_bytes: 1024,
+                cancel: &cancel,
+            },
+            |_| lines += 1,
+        )
+        .await
+        .expect("a large-but-line-bounded run must not be an error");
+
+        match outcome {
+            SpawnOutcome::Done { exit_code, .. } => assert_eq!(exit_code, Some(0)),
+            SpawnOutcome::Cancelled => panic!("nothing cancelled this run"),
+        }
+        assert_eq!(lines, 200, "every line was streamed through");
+    }
+
+    /// One oversized line loses ITSELF, not the run. The line that cannot be
+    /// retained within `max_bytes` is dropped (a truncated JSON event would be
+    /// garbage anyway); the lines after it still arrive and the process still
+    /// reports its own exit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_oversized_line_is_dropped_and_the_run_continues() {
+        let script = "echo before; printf '%05000d\\n' 7; echo after";
+        let args = vec!["-c".to_string(), script.to_string()];
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut seen: Vec<String> = Vec::new();
+        let outcome = spawn_and_stream(
+            SpawnParams {
+                cli_label: "test",
+                binary: "sh",
+                args: &args,
+                extra_env: &HashMap::new(),
+                strip_env: &[],
+                cwd: ".",
+                max_bytes: 1024,
+                cancel: &cancel,
+            },
+            |l| seen.push(l.to_string()),
+        )
+        .await
+        .expect("an oversized line must not abort the run");
+
+        assert_eq!(seen, vec!["before".to_string(), "after".to_string()]);
+        match outcome {
+            SpawnOutcome::Done {
+                exit_code,
+                dropped_lines,
+                ..
+            } => {
+                assert_eq!(exit_code, Some(0));
+                assert_eq!(dropped_lines, 1, "the loss is counted, never silent");
+            }
+            SpawnOutcome::Cancelled => panic!("nothing cancelled this run"),
+        }
+    }
+
+    /// stderr retention is a TAIL, not the whole stream. It exists so
+    /// `extract_error_message` has the CLI's parting words; a chatty process
+    /// logging megabytes to stderr must not be held in full for that.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stderr_retains_a_bounded_tail() {
+        // ~1 MB of filler, then the line that matters, all on stderr.
+        let script = "i=0; while [ $i -lt 10000 ]; do printf '%0100d\\n' $i 1>&2; i=$((i+1)); done; \
+             echo 'Error: the last words' 1>&2; exit 1";
+        let args = vec!["-c".to_string(), script.to_string()];
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let outcome = spawn_and_stream(
+            SpawnParams {
+                cli_label: "test",
+                binary: "sh",
+                args: &args,
+                extra_env: &HashMap::new(),
+                strip_env: &[],
+                cwd: ".",
+                max_bytes: 1024,
+                cancel: &cancel,
+            },
+            |_| {},
+        )
+        .await
+        .expect("spawn should succeed");
+
+        match outcome {
+            SpawnOutcome::Done { stderr, .. } => {
+                let stderr = stderr.expect("stderr was written");
+                assert!(
+                    stderr.len() <= 256 * 1024,
+                    "stderr retention must be bounded, got {} bytes",
+                    stderr.len()
+                );
+                assert!(
+                    stderr.contains("the last words"),
+                    "the tail is the part that explains the failure"
+                );
+            }
+            SpawnOutcome::Cancelled => panic!("nothing cancelled this run"),
+        }
     }
 }
