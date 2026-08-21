@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.14
+
+### Fixed
+- **A long run is no longer killed when cumulative stdout crosses `max_output_bytes`.** The cap was enforced against total throughput, but streamed lines are handed to the consumer and released — the total never lived in memory. A healthy agent run streaming tens of MB of events (a long agentic turn with large tool results) died at the 10 MB mark with its entire turn discarded: `Process("output exceeded max buffer size")`, and no `Done` event. `max_output_bytes` now bounds what a single LINE may retain: an oversized line is consumed to its newline, dropped, counted, and surfaced as a `Warning` error event; the run continues and always reaches `Done`.
+- stderr is retained as a bounded 64 KiB tail (chunked reads, so a single unterminated line cannot grow it either) instead of in full. The tail is where the parting words that explain a failure live; a CLI logging megabytes to stderr no longer grows memory without bound.
+
+### Notes
+- Consumers that matched the `output exceeded max buffer size` error string will no longer see it — an over-limit line is a warning event and a dropped event, not a dead run.
+
 ## 0.2.12
 
 ### Added
