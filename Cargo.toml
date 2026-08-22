@@ -1,6 +1,6 @@
 [package]
 name = "cli-agents"
-version = "0.2.15"
+version = "0.2.16"
 edition = "2024"
 rust-version = "1.85"
 description = "Build agentic apps over users' existing AI subscriptions (Claude, Codex, Gemini)"
@@ -33,10 +33,18 @@ which = "8"
 # Windows, where the variable is USERPROFILE. This is the crate cargo itself
 # uses.
 home = "0.5"
-process-wrap = { version = "8.2.1", features = ["tokio1"] }
+# `creation-flags` is a default feature of process-wrap and is what lets the
+# `CreationFlags` wrapper (adapters/mod.rs) survive the JobObject wrapper.
+# Named explicitly so a future default change cannot silently drop it.
+process-wrap = { version = "8.2.1", features = ["tokio1", "creation-flags"] }
 
 # NO `libc`. The only thing it was used for was `setpgid`/`killpg` in
 # `adapters/mod.rs`, which `process-wrap` now does on both platforms.
+
+# CREATE_NO_WINDOW comes from here, Windows-only. Pinned to the same `windows`
+# version process-wrap already compiles (0.61) so it is one crate, not two.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_System_Threading"] }
 
 [features]
 default = []
