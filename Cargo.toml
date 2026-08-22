@@ -36,7 +36,7 @@ home = "0.5"
 # `creation-flags` is a default feature of process-wrap and is what lets the
 # `CreationFlags` wrapper (adapters/mod.rs) survive the JobObject wrapper.
 # Named explicitly so a future default change cannot silently drop it.
-process-wrap = { version = "8.2.1", features = ["tokio1", "creation-flags"] }
+process-wrap = { version = "9.1.0", features = ["tokio1", "creation-flags"] }
 
 # NO `libc`. The only thing it was used for was `setpgid`/`killpg` in
 # `adapters/mod.rs`, which `process-wrap` now does on both platforms.
