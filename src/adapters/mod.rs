@@ -163,6 +163,29 @@ pub(crate) async fn spawn_and_stream(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+
+        // ── AND IT OPENS NO CONSOLE WINDOW ──
+        //
+        // Windows gives every console-subsystem child its own console window
+        // unless the parent passes CREATE_NO_WINDOW at creation. `claude`,
+        // `codex` and `gemini` are all console programs, so a GUI application
+        // embedding this crate flashes a black terminal on every run — reported
+        // against a Tauri app, where it appears over the user's editor.
+        //
+        // A LIBRARY CANNOT LEAVE THIS TO ITS CALLER. The flag is only honoured
+        // when passed to CreateProcess, which happens inside this closure;
+        // nothing the caller holds afterwards can set it.
+        //
+        // Orthogonal to the JobObject below: that governs how the tree DIES,
+        // this governs whether it is ever VISIBLE.
+        // No `CommandExt` import: tokio's Command exposes `creation_flags`
+        // directly under cfg(windows), and importing the std trait as well is
+        // an unused-import warning.
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
     });
     #[cfg(unix)]
     wrap.wrap(ProcessGroup::leader());
