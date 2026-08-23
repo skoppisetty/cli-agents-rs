@@ -10,8 +10,8 @@ use crate::error::{Error, Result};
 use crate::events::StreamEvent;
 use crate::types::{CliName, RunOptions, RunResult};
 #[cfg(windows)]
-#[cfg(windows)]
 use process_wrap::tokio::CreationFlags;
+#[cfg(windows)]
 use process_wrap::tokio::JobObject;
 #[cfg(windows)]
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
