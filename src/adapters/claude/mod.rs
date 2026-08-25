@@ -373,6 +373,36 @@ mod tests {
         assert!(opts.providers.unwrap().claude.unwrap().append_system_prompt.is_some());
     }
 
+    /// Windows caps the WHOLE command line at 32,767 chars (CreateProcess);
+    /// macOS/Linux allow ~1–2 MB, which is why a director-sized prompt passed
+    /// every test and every developer machine and failed the first Windows
+    /// user with `os error 206`. Guard the invariant here, where a test can
+    /// see it, since nothing in this suite spawns a real process.
+    #[test]
+    fn a_director_sized_prompt_keeps_the_command_line_under_the_windows_cap() {
+        const WINDOWS_CMDLINE_MAX: usize = 32_767;
+        let big = "director rules
+".repeat(3000); // ~45 KB, the real shape
+        let opts = RunOptions {
+            task: "edit the timeline".into(),
+            providers: Some(crate::types::ProviderOptions {
+                claude: Some(crate::types::ClaudeOptions {
+                    append_system_prompt: Some(big),
+                    allowed_tools: Some("mcp__cueframe__*".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (spilled, _file) = spill_append_system_prompt(&opts).unwrap();
+        let cmdline: usize = build_args(&spilled).iter().map(|a| a.len() + 3).sum();
+        assert!(
+            cmdline < WINDOWS_CMDLINE_MAX,
+            "command line is {cmdline} chars; Windows refuses anything over {WINDOWS_CMDLINE_MAX}"
+        );
+    }
+
     #[test]
     fn a_caller_supplied_append_file_is_not_spilled() {
         let opts = RunOptions {
