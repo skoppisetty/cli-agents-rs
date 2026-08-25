@@ -27,7 +27,11 @@ impl CliAdapter for ClaudeAdapter {
             None => discover_binary(CliName::Claude).await.ok_or(Error::NoCli)?,
         };
 
-        let args = build_args(opts);
+        // Keep the spilled prompt file alive until the child has been spawned
+        // and finished — `_spill` is dropped (and the file removed) after the
+        // await below.
+        let (opts_for_args, _spill) = spill_append_system_prompt(opts)?;
+        let args = build_args(&opts_for_args);
         let extra_env = opts.env.clone().unwrap_or_default();
         let max_bytes = opts.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
 
@@ -92,6 +96,36 @@ impl CliAdapter for ClaudeAdapter {
     }
 }
 
+/// Move an inline `append_system_prompt` into a temp file so it travels as
+/// `--append-system-prompt-file <path>` instead of an argument. Returns the
+/// options to build args from and the file handle that must outlive the
+/// spawn. A caller-supplied `append_system_prompt_file` is left untouched.
+fn spill_append_system_prompt(
+    opts: &RunOptions,
+) -> Result<(RunOptions, Option<tempfile::NamedTempFile>)> {
+    let inline = opts
+        .providers
+        .as_ref()
+        .and_then(|p| p.claude.as_ref())
+        .filter(|co| co.append_system_prompt_file.is_none())
+        .and_then(|co| co.append_system_prompt.clone());
+    let Some(text) = inline else {
+        return Ok((opts.clone(), None));
+    };
+    let mut file = tempfile::Builder::new()
+        .prefix("cli-agents-append-system-prompt-")
+        .suffix(".md")
+        .tempfile()
+        .map_err(Error::Io)?;
+    std::io::Write::write_all(&mut file, text.as_bytes()).map_err(Error::Io)?;
+    let mut spilled = opts.clone();
+    if let Some(co) = spilled.providers.as_mut().and_then(|p| p.claude.as_mut()) {
+        co.append_system_prompt_file = Some(file.path().to_string_lossy().into_owned());
+        co.append_system_prompt = None;
+    }
+    Ok((spilled, Some(file)))
+}
+
 fn build_args(opts: &RunOptions) -> Vec<String> {
     let mut args = vec![
         "-p".into(),
@@ -126,7 +160,10 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
             args.push("--tools".into());
             args.push(tools.clone());
         }
-        if let Some(append) = &co.append_system_prompt {
+        if let Some(path) = &co.append_system_prompt_file {
+            args.push("--append-system-prompt-file".into());
+            args.push(path.clone());
+        } else if let Some(append) = &co.append_system_prompt {
             args.push("--append-system-prompt".into());
             args.push(append.clone());
         }
@@ -286,6 +323,72 @@ mod tests {
         assert!(args.contains(&"--effort".to_string()));
         assert!(args.contains(&"low".to_string()));
         assert!(args.contains(&"--agents".to_string()));
+    }
+
+    #[test]
+    fn build_args_append_system_prompt_file_takes_precedence_over_inline() {
+        let opts = RunOptions {
+            task: "hello".into(),
+            providers: Some(crate::types::ProviderOptions {
+                claude: Some(crate::types::ClaudeOptions {
+                    append_system_prompt: Some("inline".into()),
+                    append_system_prompt_file: Some("/path/to/append.md".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let args = build_args(&opts);
+        assert!(args.contains(&"--append-system-prompt-file".to_string()));
+        assert!(args.contains(&"/path/to/append.md".to_string()));
+        assert!(!args.contains(&"--append-system-prompt".to_string()));
+        assert!(!args.contains(&"inline".to_string()));
+    }
+
+    #[test]
+    fn inline_append_system_prompt_is_spilled_to_a_file_for_the_spawn() {
+        // A ~40 KB prompt is the shape that hit Windows' 32 K argv cap.
+        let big = "director rules
+".repeat(3000);
+        let opts = RunOptions {
+            task: "hello".into(),
+            providers: Some(crate::types::ProviderOptions {
+                claude: Some(crate::types::ClaudeOptions {
+                    append_system_prompt: Some(big.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (spilled, file) = spill_append_system_prompt(&opts).unwrap();
+        let file = file.expect("inline prompt must be spilled");
+        assert_eq!(std::fs::read_to_string(file.path()).unwrap(), big);
+        let args = build_args(&spilled);
+        assert!(args.contains(&"--append-system-prompt-file".to_string()));
+        assert!(args.contains(&file.path().to_string_lossy().into_owned()));
+        assert!(!args.contains(&"--append-system-prompt".to_string()));
+        // The original options are untouched — the caller's struct is not mutated.
+        assert!(opts.providers.unwrap().claude.unwrap().append_system_prompt.is_some());
+    }
+
+    #[test]
+    fn a_caller_supplied_append_file_is_not_spilled() {
+        let opts = RunOptions {
+            task: "hello".into(),
+            providers: Some(crate::types::ProviderOptions {
+                claude: Some(crate::types::ClaudeOptions {
+                    append_system_prompt: Some("inline".into()),
+                    append_system_prompt_file: Some("/mine.md".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (_, file) = spill_append_system_prompt(&opts).unwrap();
+        assert!(file.is_none());
     }
 
     #[test]

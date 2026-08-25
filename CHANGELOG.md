@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.18
+
+### Fixed
+- **Claude: a long appended system prompt no longer fails to spawn on Windows.** `append_system_prompt` was passed as an argument; a director-sized prompt (tens of KB) exceeded the 32 K command-line limit and the run died before it started with `failed to spawn claude: The filename or extension is too long (os error 206)`. The adapter now writes the inline prompt to a temp file for the lifetime of the spawn and passes `--append-system-prompt-file` (Claude Code ≥ 2.1), on every OS.
+
+### Added
+- `ClaudeOptions.append_system_prompt_file` (`appendSystemPromptFile`): supply your own file; it takes precedence over the inline form and is never spilled.
+
 ## 0.2.14
 
 ### Fixed

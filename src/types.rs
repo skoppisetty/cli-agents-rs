@@ -86,6 +86,14 @@ pub struct ClaudeOptions {
     pub disallowed_tools: Option<String>,
     pub tools: Option<String>,
     pub append_system_prompt: Option<String>,
+    /// Path to a file whose contents are appended to the system prompt
+    /// (`--append-system-prompt-file`). Takes precedence over the inline
+    /// `append_system_prompt`. When only the inline form is given, the
+    /// adapter writes it to a temp file and uses this flag anyway: a director
+    /// prompt of a few tens of KB blows past Windows' 32 K command-line limit
+    /// as an argument (`failed to spawn claude: The filename or extension is
+    /// too long (os error 206)`), and a file has no such limit on any OS.
+    pub append_system_prompt_file: Option<String>,
     pub max_turns: Option<u32>,
     pub max_budget_usd: Option<f64>,
     pub max_thinking_tokens: Option<u32>,
