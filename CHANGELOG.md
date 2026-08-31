@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-08-31
 
 ### Changed
 - Replaced the deprecated Gemini CLI provider with Google Antigravity CLI support. The new adapter discovers `agy`, parses its headless NDJSON stream, and supports conversation resumption, model/effort/agent selection, sandboxing, and permission bypass.
