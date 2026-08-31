@@ -1,10 +1,10 @@
+mod antigravity;
 mod claude;
 mod codex;
-mod gemini;
 
+pub use antigravity::AntigravityAdapter;
 pub use claude::ClaudeAdapter;
 pub use codex::CodexAdapter;
-pub use gemini::GeminiAdapter;
 
 use crate::error::{Error, Result};
 use crate::events::StreamEvent;
@@ -13,8 +13,6 @@ use crate::types::{CliName, RunOptions, RunResult};
 use process_wrap::tokio::CreationFlags;
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
-#[cfg(windows)]
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessGroup;
 use process_wrap::tokio::TokioChildWrapper;
@@ -22,6 +20,8 @@ use process_wrap::tokio::TokioCommandWrap;
 use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{debug, warn};
+#[cfg(windows)]
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 /// Trait implemented by each CLI adapter.
 pub trait CliAdapter: Send + Sync {
@@ -40,7 +40,7 @@ pub(crate) fn get_adapter(cli: CliName) -> Box<dyn CliAdapterBoxed> {
     match cli {
         CliName::Claude => Box::new(ClaudeAdapter),
         CliName::Codex => Box::new(CodexAdapter),
-        CliName::Gemini => Box::new(GeminiAdapter),
+        CliName::Antigravity => Box::new(AntigravityAdapter),
     }
 }
 
@@ -176,7 +176,7 @@ pub(crate) async fn spawn_and_stream(
     //
     // Windows gives every console-subsystem child its own console window unless
     // the parent passes CREATE_NO_WINDOW at CreateProcess. `claude`, `codex` and
-    // `gemini` are console programs, so a GUI app embedding this crate flashes a
+    // `agy` are console programs, so a GUI app embedding this crate flashes a
     // black terminal on every run — reported against a Tauri app, over the
     // user's editor.
     //

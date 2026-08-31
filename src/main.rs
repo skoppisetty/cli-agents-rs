@@ -3,7 +3,7 @@ use cli_agents::{CliName, RunOptions, StreamEvent, run};
 use std::io::Write;
 use std::sync::Arc;
 
-/// Unified AI CLI framework for Claude, Codex, and Gemini.
+/// Unified AI CLI framework for Claude, Codex, and Antigravity.
 #[derive(Parser)]
 #[command(name = "cli-agents", arg_required_else_help = true)]
 struct Args {
@@ -51,9 +51,9 @@ fn parse_cli_name(s: &str) -> Result<CliName, String> {
     match s {
         "claude" => Ok(CliName::Claude),
         "codex" => Ok(CliName::Codex),
-        "gemini" => Ok(CliName::Gemini),
+        "antigravity" => Ok(CliName::Antigravity),
         other => Err(format!(
-            "unknown CLI '{other}': use claude, codex, or gemini"
+            "unknown CLI '{other}': use claude, codex, or antigravity"
         )),
     }
 }
@@ -67,7 +67,7 @@ async fn main() {
         let results = cli_agents::discovery::discover_all().await;
         if results.is_empty() {
             eprintln!("No CLI agents found on this system.");
-            eprintln!("Install one of: claude, codex, gemini");
+            eprintln!("Install one of: claude, codex, antigravity");
             std::process::exit(1);
         }
         for (name, path) in &results {

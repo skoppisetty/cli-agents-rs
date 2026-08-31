@@ -6,7 +6,7 @@ generated: true
 
 # Streaming Events
 
-Every agent run emits a stream of [`StreamEvent`](/api/events) values through the callback you pass to `run()`. All three providers (Claude, Codex, Gemini) are normalized into the same event types.
+Every agent run emits a stream of [`StreamEvent`](/api/events) values through the callback you pass to `run()`. All three providers (Claude, Codex, Antigravity) are normalized into the same event types.
 
 ## Handling events
 
@@ -118,7 +118,7 @@ cli-agents --cli codex --cwd ./my-project \
   "Review src/lib.rs for potential bugs."
 
 # Verbose mode (show tool calls, thinking, and token stats)
-cli-agents --cli gemini -v --cwd ~/projects/my-app "What dependencies does this project have?"
+cli-agents --cli antigravity -v --cwd ~/projects/my-app "What dependencies does this project have?"
 
 # List available CLIs
 cli-agents --discover
@@ -128,7 +128,7 @@ cli-agents --discover
 
 | Flag | Description |
 |------|-------------|
-| `--cli <name>` | Which CLI to use (`claude`, `codex`, `gemini`) — auto-discovers if omitted |
+| `--cli <name>` | Which CLI to use (`claude`, `codex`, `antigravity`) — auto-discovers if omitted |
 | `--model <name>` | Model name (e.g. `sonnet`, `opus`, `o3`) |
 | `--system <prompt>` | System prompt |
 | `--append-system-prompt <text>` | Append to the system prompt |

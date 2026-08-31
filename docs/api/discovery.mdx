@@ -44,7 +44,7 @@ for (name, path) in &all {
 }
 // Output:
 // claude: /usr/local/bin/claude
-// gemini: /opt/homebrew/bin/gemini
+// antigravity: /Users/example/.local/bin/agy
 ```
 
 ### `discover_first()`
@@ -53,7 +53,7 @@ for (name, path) in &all {
 pub async fn discover_first() -> Option<(CliName, String)>
 ```
 
-Discover the first available CLI binary. Priority order: Claude → Codex → Gemini. All lookups run concurrently and the highest-priority match is returned.
+Discover the first available CLI binary. Priority order: Claude → Codex → Antigravity. All lookups run concurrently and the highest-priority match is returned.
 
 This is what `run()` uses internally when `opts.cli` is `None`.
 

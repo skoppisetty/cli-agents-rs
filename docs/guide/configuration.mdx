@@ -14,6 +14,7 @@ Set a system prompt inline or from a file. When both are provided, `system_promp
 
 ```rust
 let opts = RunOptions {
+    cli: Some(CliName::Claude),
     task: "Review src/lib.rs for potential bugs.".into(),
     system_prompt: Some("You are a senior Rust reviewer. Be concise.".into()),
     ..Default::default()
@@ -22,6 +23,7 @@ let opts = RunOptions {
 
 ```rust
 let opts = RunOptions {
+    cli: Some(CliName::Claude),
     task: "Review the codebase.".into(),
     system_prompt_file: Some("./prompts/reviewer.md".into()),
     ..Default::default()
@@ -31,14 +33,14 @@ let opts = RunOptions {
 Each adapter handles system prompts differently under the hood:
 - **Claude** — passed via `--system-prompt` or `--system-prompt-file` flags
 - **Codex** — written to a temporary `config.toml` as the `instructions` field
-- **Gemini** — written to a temporary file and referenced via `GEMINI_SYSTEM_MD` env var
+- **Antigravity** — unsupported in headless mode; setting either field returns an error
 
 ## MCP servers
 
 Configure [Model Context Protocol](https://modelcontextprotocol.io/) servers that the agent can use as tools:
 
 ```rust
-use cli_agents::{McpServer, RunOptions};
+use cli_agents::{CliName, McpServer, RunOptions};
 use std::collections::HashMap;
 
 let mut servers = HashMap::new();
@@ -49,11 +51,18 @@ servers.insert("my-server".into(), McpServer {
 });
 
 let opts = RunOptions {
+    cli: Some(CliName::Claude),
     task: "List the 5 most recent open issues.".into(),
     mcp_servers: Some(servers),
     ..Default::default()
 };
 ```
+
+Antigravity does not expose a per-run MCP configuration path. It loads global
+servers from `~/.gemini/config/mcp_config.json` and workspace servers from
+`.agents/mcp_config.json`. When Antigravity is selected, a non-empty
+`RunOptions.mcp_servers` returns an error without changing the working directory
+or either configuration file.
 
 ### Stdio transport
 
@@ -126,7 +135,7 @@ let opts = RunOptions {
 This passes provider-specific flags:
 - **Claude** — `--dangerously-skip-permissions` + `--permission-mode bypassPermissions`
 - **Codex** — `--dangerously-bypass-approvals-and-sandbox`
-- **Gemini** — `--yolo`
+- **Antigravity** — `--dangerously-skip-permissions`
 
 > ⚠️ **Use with caution** — the agent will execute tools without human confirmation.
 
@@ -180,18 +189,21 @@ let opts = RunOptions {
 
 See [`CodexOptions`](/api/types#codexoptions) for all fields.
 
-### Gemini
+### Antigravity
 
 ```rust
-use cli_agents::{RunOptions, ProviderOptions, GeminiOptions};
+use cli_agents::{RunOptions, ProviderOptions, AntigravityOptions, CliName};
 
 let opts = RunOptions {
+    cli: Some(CliName::Antigravity),
     task: "Explain the architecture.".into(),
     providers: Some(ProviderOptions {
-        gemini: Some(GeminiOptions {
+        antigravity: Some(AntigravityOptions {
             sandbox: Some(true),
-            approval_mode: Some("auto".into()),
-            extra_args: Some(vec!["--verbose".into()]),
+            effort: Some("high".into()),
+            agent: Some("reviewer".into()),
+            print_timeout: Some("10m".into()),
+            extra_args: Some(vec!["--json-schema".into(), "string".into()]),
         }),
         ..Default::default()
     }),
@@ -199,7 +211,7 @@ let opts = RunOptions {
 };
 ```
 
-See [`GeminiOptions`](/api/types#geminioptions) for all fields.
+See [`AntigravityOptions`](/api/types#antigravityoptions) for all fields.
 
 ## Environment variables
 

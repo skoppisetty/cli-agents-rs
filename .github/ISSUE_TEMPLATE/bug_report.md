@@ -15,5 +15,5 @@ labels: bug
 
 **Environment**
 - OS:
-- AI CLI: claude / codex / gemini
+- AI CLI: claude / codex / antigravity
 - cli-agents version:

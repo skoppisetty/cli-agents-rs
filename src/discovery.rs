@@ -148,12 +148,22 @@ const HOME_RELATIVE_PATHS: &[&str] = &[".local/bin", ".bun/bin", ".npm-global/bi
 /// `%APPDATA%` and nvm-windows both sit under the user profile, which is what
 /// `home::home_dir()` returns here.
 #[cfg(windows)]
-const HOME_RELATIVE_PATHS: &[&str] = &["AppData/Roaming/npm", "AppData/Roaming/nvm", ".bun/bin"];
+const HOME_RELATIVE_PATHS: &[&str] = &[
+    "AppData/Roaming/npm",
+    "AppData/Roaming/nvm",
+    "AppData/Local/agy/bin",
+    ".bun/bin",
+];
 
 const CLAUDE_EXTRA_PATHS: &[&str] = &[".claude/local/claude"];
 
 fn search_for_binary(cli: CliName) -> Option<String> {
-    let binary = cli.to_string();
+    // The public provider name is `antigravity`, while Google's installed
+    // executable is intentionally the shorter `agy`.
+    let binary = match cli {
+        CliName::Antigravity => "agy".to_string(),
+        _ => cli.to_string(),
+    };
 
     // 1. PATH
     if let Some(path) = which_on_path(&binary) {
@@ -222,10 +232,10 @@ pub async fn discover_binary(cli: CliName) -> Option<String> {
 
 /// Discover all available CLI binaries (concurrent).
 pub async fn discover_all() -> Vec<(CliName, String)> {
-    let (claude, codex, gemini) = tokio::join!(
+    let (claude, codex, antigravity) = tokio::join!(
         discover_binary(CliName::Claude),
         discover_binary(CliName::Codex),
-        discover_binary(CliName::Gemini),
+        discover_binary(CliName::Antigravity),
     );
 
     let mut results = Vec::new();
@@ -235,20 +245,20 @@ pub async fn discover_all() -> Vec<(CliName, String)> {
     if let Some(path) = codex {
         results.push((CliName::Codex, path));
     }
-    if let Some(path) = gemini {
-        results.push((CliName::Gemini, path));
+    if let Some(path) = antigravity {
+        results.push((CliName::Antigravity, path));
     }
     results
 }
 
-/// Discover the first available CLI binary (preference: Claude > Codex > Gemini).
+/// Discover the first available CLI binary (preference: Claude > Codex > Antigravity).
 ///
 /// Runs all lookups concurrently and returns the highest-priority match.
 pub async fn discover_first() -> Option<(CliName, String)> {
-    let (claude, codex, gemini) = tokio::join!(
+    let (claude, codex, antigravity) = tokio::join!(
         discover_binary(CliName::Claude),
         discover_binary(CliName::Codex),
-        discover_binary(CliName::Gemini),
+        discover_binary(CliName::Antigravity),
     );
 
     if let Some(path) = claude {
@@ -257,8 +267,8 @@ pub async fn discover_first() -> Option<(CliName, String)> {
     if let Some(path) = codex {
         return Some((CliName::Codex, path));
     }
-    if let Some(path) = gemini {
-        return Some((CliName::Gemini, path));
+    if let Some(path) = antigravity {
+        return Some((CliName::Antigravity, path));
     }
     None
 }
@@ -395,6 +405,6 @@ mod tests {
     fn cli_name_display() {
         assert_eq!(CliName::Claude.to_string(), "claude");
         assert_eq!(CliName::Codex.to_string(), "codex");
-        assert_eq!(CliName::Gemini.to_string(), "gemini");
+        assert_eq!(CliName::Antigravity.to_string(), "antigravity");
     }
 }

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Replaced the deprecated Gemini CLI provider with Google Antigravity CLI support. The new adapter discovers `agy`, parses its headless NDJSON stream, and supports conversation resumption, model/effort/agent selection, sandboxing, and permission bypass.
+- The public provider API is now `CliName::Antigravity`, `AntigravityOptions`, and `ProviderOptions::antigravity`. The command-line selector is `--cli antigravity`.
+- Antigravity uses its existing global/workspace MCP configuration. Per-run `mcp_servers` are rejected because the CLI has no config-path override; the adapter never overwrites user configuration or changes the requested working directory.
+
 ## 0.2.18
 
 ### Fixed

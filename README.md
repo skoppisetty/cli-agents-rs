@@ -9,7 +9,7 @@ Build agentic apps on top of your users' existing AI subscriptions.
 
 Instead of requiring API keys or managing token costs, `cli-agents` spawns
 the AI CLI tools users already have installed — Claude Code, Codex, or
-Gemini CLI — and provides a unified Rust interface for streaming events,
+Antigravity CLI — and provides a unified Rust interface for streaming events,
 tool calls, cancellation, and structured results. Your app brings the UX;
 the user brings their own subscription.
 
@@ -21,7 +21,7 @@ the user brings their own subscription.
   calls, errors, and completion across all providers.
 - **Timeouts & guardrails** — idle timeout, total timeout, and consecutive
   tool-failure limits with automatic cancellation.
-- **MCP support** — configure Model Context Protocol servers for all adapters.
+- **MCP support** — configure Model Context Protocol servers for Claude and Codex; Antigravity uses its existing workspace/global MCP configuration.
 - **Async / Tokio** — fully async with cancellation via `CancellationToken`.
 
 ## Quick start
@@ -84,11 +84,11 @@ You need at least one supported AI CLI installed:
 |-----|---------|
 | Claude Code | `npm install -g @anthropic-ai/claude-code` |
 | Codex | `npm install -g @openai/codex` |
-| Gemini CLI | `npm install -g @google/gemini-cli` |
+| Antigravity CLI | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` |
 
 ## Auto-discovery
 
-Omit `cli` to auto-discover the first available agent (Claude > Codex > Gemini):
+Omit `cli` to auto-discover the first available agent (Claude > Codex > Antigravity):
 
 ```rust
 let opts = RunOptions {
@@ -116,6 +116,7 @@ for (name, path) in &all {
 
 ```rust
 let opts = RunOptions {
+    cli: Some(CliName::Claude),
     task: "Read src/ and identify any potential security issues or panics.".into(),
     cwd: Some("./my-project".into()),
     system_prompt: Some("You are a senior Rust reviewer. Be concise.".into()),
@@ -128,7 +129,7 @@ let opts = RunOptions {
 ### MCP servers
 
 ```rust
-use cli_agents::{McpServer, RunOptions};
+use cli_agents::{CliName, McpServer, RunOptions};
 use std::collections::HashMap;
 
 let mut servers = HashMap::new();
@@ -139,11 +140,17 @@ servers.insert("my-server".into(), McpServer {
 });
 
 let opts = RunOptions {
+    cli: Some(CliName::Claude),
     task: "List the 5 most recent open issues.".into(),
     mcp_servers: Some(servers),
     ..Default::default()
 };
 ```
+
+Antigravity has no per-run MCP config-path override. Configure its servers in
+`.agents/mcp_config.json` (workspace) or `~/.gemini/config/mcp_config.json`
+(global); passing `mcp_servers` with `CliName::Antigravity` returns an error and
+does not modify either file.
 
 ### Timeouts and safety
 
@@ -163,7 +170,8 @@ let opts = RunOptions {
 
 By default, the library does **not** bypass CLI permission prompts. Set
 `skip_permissions: true` to pass flags like `--dangerously-skip-permissions`
-(Claude) or `--dangerously-bypass-approvals-and-sandbox` (Codex).
+(Claude), `--dangerously-bypass-approvals-and-sandbox` (Codex), or
+`--dangerously-skip-permissions` (Antigravity).
 **Use with caution** — the agent will execute tools without human confirmation.
 
 ### Provider-specific options
@@ -205,7 +213,7 @@ let result = handle.result.await.unwrap().unwrap();
 ## Why cli-agents?
 
 AI APIs require API keys and charge per token. Most developers already pay for
-Claude Pro, ChatGPT Plus, or Gemini — and those subscriptions come with CLI
+Claude Pro, ChatGPT Plus, or Google Antigravity — and those subscriptions come with CLI
 tools. `cli-agents` lets you build desktop apps, dev tools, and automation
 that run on the user's existing subscription with zero API cost to you.
 
@@ -264,8 +272,8 @@ cli-agents --cli codex --cwd ./my-project \
 # Stream events as JSON lines (useful for piping into other tools)
 cli-agents --json --cwd ./my-project "List all public structs in src/"
 
-# Verbose mode with Gemini (show tool calls, thinking, and token stats)
-cli-agents --cli gemini -v --cwd ~/projects/my-app "What dependencies does this project have?"
+# Verbose mode with Antigravity (show tool calls and token stats)
+cli-agents --cli antigravity -v --cwd ~/projects/my-app "What dependencies does this project have?"
 
 # List available CLIs on this system
 cli-agents --discover

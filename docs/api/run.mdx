@@ -24,8 +24,8 @@ pub fn run(
 **Returns:** A [`RunHandle`](#runhandle) with the result future and cancellation token.
 
 **Behavior:**
-1. Resolves which CLI to use — either from `opts.cli` or via [auto-discovery](/api/discovery) (Claude → Codex → Gemini priority)
-2. Spawns the CLI subprocess with the appropriate adapter (Claude, Codex, or Gemini)
+1. Resolves which CLI to use — either from `opts.cli` or via [auto-discovery](/api/discovery) (Claude → Codex → Antigravity priority)
+2. Spawns the CLI subprocess with the appropriate adapter (Claude, Codex, or Antigravity)
 3. Streams stdout line-by-line, parsing provider-specific JSON into unified [`StreamEvent`](/api/events) values
 4. Tracks idle timeout, total timeout, and consecutive tool failures
 5. On completion or cancellation, emits `StreamEvent::Done` and returns the [`RunResult`](#runresult)
@@ -135,7 +135,7 @@ pub struct RunStats {
 |-------|------|-------------|
 | `input_tokens` | `Option<u64>` | Number of input tokens consumed |
 | `output_tokens` | `Option<u64>` | Number of output tokens generated |
-| `total_tokens` | `Option<u64>` | Total tokens (Gemini) |
+| `total_tokens` | `Option<u64>` | Total tokens (where reported) |
 | `cached_tokens` | `Option<u64>` | Tokens served from cache |
 | `duration_ms` | `Option<u64>` | Wall-clock duration of the run |
 | `tool_calls` | `Option<u32>` | Number of tool calls made |

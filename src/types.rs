@@ -8,7 +8,7 @@ use std::collections::HashMap;
 pub enum CliName {
     Claude,
     Codex,
-    Gemini,
+    Antigravity,
 }
 
 impl std::fmt::Display for CliName {
@@ -16,7 +16,7 @@ impl std::fmt::Display for CliName {
         match self {
             Self::Claude => write!(f, "claude"),
             Self::Codex => write!(f, "codex"),
-            Self::Gemini => write!(f, "gemini"),
+            Self::Antigravity => write!(f, "antigravity"),
         }
     }
 }
@@ -124,7 +124,7 @@ pub struct CodexOptions {
     pub output_schema: Option<String>,
     /// Extra arguments appended verbatim to the Codex CLI invocation.
     ///
-    /// Same semantics as the Claude / Gemini equivalents — pass any flags
+    /// Same semantics as the Claude / Antigravity equivalents — pass any flags
     /// this crate doesn't model. Appended last, so they can override earlier
     /// defaults.
     pub extra_args: Option<Vec<String>>,
@@ -132,9 +132,14 @@ pub struct CodexOptions {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GeminiOptions {
-    pub approval_mode: Option<String>,
+pub struct AntigravityOptions {
+    /// Reasoning effort (`low`, `medium`, or `high`).
+    pub effort: Option<String>,
+    /// Custom agent name, as listed by `agy agents`.
+    pub agent: Option<String>,
     pub sandbox: Option<bool>,
+    /// Antigravity headless timeout (for example, `10m`).
+    pub print_timeout: Option<String>,
     pub extra_args: Option<Vec<String>>,
 }
 
@@ -142,7 +147,7 @@ pub struct GeminiOptions {
 pub struct ProviderOptions {
     pub claude: Option<ClaudeOptions>,
     pub codex: Option<CodexOptions>,
-    pub gemini: Option<GeminiOptions>,
+    pub antigravity: Option<AntigravityOptions>,
 }
 
 /// Options passed to [`run()`](crate::run).
@@ -161,7 +166,8 @@ pub struct RunOptions {
     /// Path to a system prompt file (alternative to inline `system_prompt`).
     pub system_prompt_file: Option<String>,
 
-    /// MCP servers to connect.
+    /// MCP servers to connect. Antigravity does not support per-run MCP
+    /// injection; configure its workspace/global MCP files instead.
     pub mcp_servers: Option<HashMap<String, McpServer>>,
 
     /// Working directory for the CLI process.

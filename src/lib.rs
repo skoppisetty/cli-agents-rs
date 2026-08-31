@@ -4,7 +4,7 @@
 //!
 //! Instead of requiring API keys or managing token costs, `cli-agents` spawns
 //! the AI CLI tools users already have installed — Claude Code, Codex, or
-//! Gemini CLI — and provides a unified interface for streaming events,
+//! Antigravity CLI — and provides a unified interface for streaming events,
 //! tool calls, cancellation, and structured results.
 //!
 //! ## Quick start
@@ -55,6 +55,6 @@ pub use error::{Error, Result};
 pub use events::{Severity, StreamEvent};
 pub use runner::{RunHandle, run};
 pub use types::{
-    ClaudeOptions, CliName, CodexOptions, GeminiOptions, McpServer, McpTransport, ProviderOptions,
-    RunOptions, RunResult, RunStats, SettingSource,
+    AntigravityOptions, ClaudeOptions, CliName, CodexOptions, McpServer, McpTransport,
+    ProviderOptions, RunOptions, RunResult, RunStats, SettingSource,
 };
