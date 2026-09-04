@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.21
+
+- Add an opt-in `clearEnv` process policy so sandboxed embedders can prevent
+  parent-process secrets and behavior-changing variables from reaching a CLI.
+
 ## 0.2.20
 
 ### Fixed

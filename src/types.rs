@@ -182,6 +182,13 @@ pub struct RunOptions {
     /// Extra environment variables for the CLI process.
     pub env: Option<HashMap<String, String>>,
 
+    /// Start the CLI process with an empty environment before applying `env`.
+    ///
+    /// Defaults to `false` for backwards compatibility. Sandboxed embedders
+    /// should set this to `true` and provide every variable the child requires.
+    #[serde(default)]
+    pub clear_env: bool,
+
     /// Directory in which adapters create temporary provider-readable
     /// artifacts such as prompt files and generated configuration.
     ///

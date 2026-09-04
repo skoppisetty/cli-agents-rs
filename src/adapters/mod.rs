@@ -13,8 +13,6 @@ use crate::types::{CliName, RunOptions, RunResult};
 use process_wrap::tokio::CreationFlags;
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
-#[cfg(windows)]
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessGroup;
 use process_wrap::tokio::TokioChildWrapper;
@@ -22,6 +20,8 @@ use process_wrap::tokio::TokioCommandWrap;
 use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{debug, warn};
+#[cfg(windows)]
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 /// Trait implemented by each CLI adapter.
 pub trait CliAdapter: Send + Sync {
@@ -113,6 +113,8 @@ pub(crate) struct SpawnParams<'a> {
     pub binary: &'a str,
     pub args: &'a [String],
     pub extra_env: &'a HashMap<String, String>,
+    /// Start with no inherited parent-process environment.
+    pub clear_env: bool,
     /// Keys to remove from the inherited parent env before applying `extra_env`.
     /// Used to prevent leaks like `ANTHROPIC_API_KEY` overriding subscription auth.
     pub strip_env: &'a [&'static str],
@@ -126,7 +128,8 @@ pub(crate) struct SpawnParams<'a> {
 /// Handles the boilerplate shared across all adapters: process spawning,
 /// stdout buffering with size limits, stderr collection, and cancellation.
 /// Does **not** clone the parent process environment — `Command` inherits it
-/// automatically; only `extra_env` entries are added.
+/// automatically unless `SpawnParams::clear_env` is set; `extra_env` entries
+/// are then overlaid in either mode.
 pub(crate) async fn spawn_and_stream(
     params: SpawnParams<'_>,
     mut on_line: impl FnMut(&str) + Send,
@@ -136,6 +139,7 @@ pub(crate) async fn spawn_and_stream(
         binary,
         args,
         extra_env,
+        clear_env,
         strip_env,
         cwd,
         max_bytes,
@@ -158,6 +162,9 @@ pub(crate) async fn spawn_and_stream(
     // to a job that dies with it.
     let mut wrap = TokioCommandWrap::with_new(binary, |cmd| {
         cmd.args(args);
+        if clear_env {
+            cmd.env_clear();
+        }
         for key in strip_env {
             cmd.env_remove(key);
         }
@@ -427,6 +434,44 @@ async fn kill_process_group(child: &mut Box<dyn TokioChildWrapper>) {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clear_env_exposes_only_explicit_child_variables() {
+        let args = vec![
+            "-c".to_string(),
+            "printf '%s|%s\\n' \"${HOME-unset}\" \"${OWNED-unset}\"".to_string(),
+        ];
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let extra_env = HashMap::from([("OWNED".to_string(), "yes".to_string())]);
+        let mut lines = Vec::new();
+
+        let outcome = spawn_and_stream(
+            SpawnParams {
+                cli_label: "test",
+                binary: "sh",
+                args: &args,
+                extra_env: &extra_env,
+                clear_env: true,
+                strip_env: &[],
+                cwd: ".",
+                max_bytes: 1024,
+                cancel: &cancel,
+            },
+            |line| lines.push(line.to_string()),
+        )
+        .await
+        .expect("spawn should succeed");
+
+        assert!(matches!(
+            outcome,
+            SpawnOutcome::Done {
+                exit_code: Some(0),
+                ..
+            }
+        ));
+        assert_eq!(lines, vec!["unset|yes"]);
+    }
+
     /// CANCELLING TAKES THE WHOLE TREE, not just the process we spawned.
     ///
     /// This is the contract `setpgid`/`killpg` existed to provide, and it had no
@@ -472,6 +517,7 @@ mod tests {
                 binary: "sh",
                 args: &args,
                 extra_env: &HashMap::new(),
+                clear_env: false,
                 strip_env: &[],
                 cwd: dir.path().to_str().unwrap(),
                 max_bytes: 1024,
@@ -515,6 +561,7 @@ mod tests {
                 binary: "sh",
                 args: &args,
                 extra_env: &HashMap::new(),
+                clear_env: false,
                 strip_env: &[],
                 cwd: ".",
                 max_bytes: 1024,
@@ -548,6 +595,7 @@ mod tests {
                 binary: "sh",
                 args: &args,
                 extra_env: &HashMap::new(),
+                clear_env: false,
                 strip_env: &[],
                 cwd: ".",
                 max_bytes: 1024,
@@ -600,6 +648,7 @@ mod tests {
                 binary: "sh",
                 args: &args,
                 extra_env: &HashMap::new(),
+                clear_env: false,
                 strip_env: &[],
                 cwd: ".",
                 max_bytes: 1024,
@@ -634,6 +683,7 @@ mod tests {
                 binary: "sh",
                 args: &args,
                 extra_env: &HashMap::new(),
+                clear_env: false,
                 strip_env: &[],
                 cwd: ".",
                 max_bytes: 1024,
@@ -675,6 +725,7 @@ mod tests {
                 binary: "sh",
                 args: &args,
                 extra_env: &HashMap::new(),
+                clear_env: false,
                 strip_env: &[],
                 cwd: ".",
                 max_bytes: 1024,

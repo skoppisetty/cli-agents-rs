@@ -48,6 +48,7 @@ impl CliAdapter for CodexAdapter {
                 binary: &binary,
                 args: &args,
                 extra_env: &extra_env,
+                clear_env: opts.clear_env,
                 strip_env: &[],
                 cwd: opts.cwd.as_deref().unwrap_or("."),
                 max_bytes,
@@ -260,17 +261,18 @@ async fn write_configs(
 
 fn resolve_codex_home(opts: &RunOptions) -> Option<PathBuf> {
     let configured = opts.env.as_ref().and_then(|env| {
-        env.get("CODEX_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env.get("HOME").map(|home| PathBuf::from(home).join(".codex")))
+        env.get("CODEX_HOME").map(PathBuf::from).or_else(|| {
+            env.get("HOME")
+                .map(|home| PathBuf::from(home).join(".codex"))
+        })
     });
     if configured.is_some() || opts.artifact_dir.is_some() {
         return configured;
     }
 
-    std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"))
-    })
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
 }
 
 /// Symlink top-level entries of `src` into `dst`, skipping `config.toml`

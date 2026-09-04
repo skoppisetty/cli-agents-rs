@@ -51,6 +51,7 @@ impl CliAdapter for GeminiAdapter {
                 binary: &binary,
                 args: &cli_args,
                 extra_env: &extra_env,
+                clear_env: opts.clear_env,
                 strip_env: &[],
                 cwd: effective_cwd,
                 max_bytes,
@@ -377,9 +378,8 @@ mod tests {
         };
 
         let (env, cwd_override, handle) = write_configs(&opts).await.unwrap();
-        let settings_path = std::path::PathBuf::from(
-            env.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH").unwrap(),
-        );
+        let settings_path =
+            std::path::PathBuf::from(env.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH").unwrap());
 
         assert!(settings_path.starts_with(artifact_dir.path()));
         assert_eq!(cwd_override, None);

@@ -224,6 +224,11 @@ config as JSON and receive `StreamEvent`s back via Tauri events.
 See [`tauri-example/`](tauri-example/) for a
 complete Tauri integration with streaming and cancellation.
 
+Sandboxed embedders should set `clear_env: true`, supply a minimal `env`
+allowlist, and set `artifact_dir` to a writable directory inside the sandbox.
+This prevents parent-process secrets from entering the CLI and keeps generated
+prompt/configuration files inside the same capability boundary.
+
 ### Dev tools and CI
 
 Build custom coding agents, review bots, or CI automation that piggyback on

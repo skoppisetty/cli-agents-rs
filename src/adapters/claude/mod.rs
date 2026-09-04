@@ -44,6 +44,7 @@ impl CliAdapter for ClaudeAdapter {
                 binary: &binary,
                 args: &args,
                 extra_env: &extra_env,
+                clear_env: opts.clear_env,
                 // Strip Anthropic API auth env vars so the CLI uses its own
                 // subscription credentials (OAuth/keychain). Without this, a
                 // user's shell `ANTHROPIC_API_KEY` would silently bill API
@@ -346,7 +347,8 @@ mod tests {
     fn inline_append_system_prompt_is_spilled_to_a_file_for_the_spawn() {
         // A ~40 KB prompt is the shape that hit Windows' 32 K argv cap.
         let big = "director rules
-".repeat(3000);
+"
+        .repeat(3000);
         let opts = RunOptions {
             task: "hello".into(),
             providers: Some(crate::types::ProviderOptions {
@@ -366,7 +368,14 @@ mod tests {
         assert!(args.contains(&file.path().to_string_lossy().into_owned()));
         assert!(!args.contains(&"--append-system-prompt".to_string()));
         // The original options are untouched — the caller's struct is not mutated.
-        assert!(opts.providers.unwrap().claude.unwrap().append_system_prompt.is_some());
+        assert!(
+            opts.providers
+                .unwrap()
+                .claude
+                .unwrap()
+                .append_system_prompt
+                .is_some()
+        );
     }
 
     /// Windows caps the WHOLE command line at 32,767 chars (CreateProcess);
@@ -378,7 +387,8 @@ mod tests {
     fn a_director_sized_prompt_keeps_the_command_line_under_the_windows_cap() {
         const WINDOWS_CMDLINE_MAX: usize = 32_767;
         let big = "director rules
-".repeat(3000); // ~45 KB, the real shape
+"
+        .repeat(3000); // ~45 KB, the real shape
         let opts = RunOptions {
             task: "edit the timeline".into(),
             providers: Some(crate::types::ProviderOptions {
