@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.20
+
+### Fixed
+- Codex config generation now resolves source state from `RunOptions.env` first and never imports the parent process's home when `artifact_dir` is set.
+- Gemini MCP settings use its explicit system-settings path when `artifact_dir` is set, keeping generated configuration inside the owned root without changing or writing to the requested working directory.
+
 ## 0.2.19
 
 ### Added

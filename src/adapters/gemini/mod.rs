@@ -165,38 +165,41 @@ async fn write_configs(
     let tmp_dir = crate::artifacts::temp_dir(opts, "cli-agents-gemini-")?;
     let mut env = HashMap::new();
 
-    // MCP servers → workspace-level .gemini/settings.json.
-    // Gemini CLI merges workspace config (from cwd) with user config (~/.gemini/),
-    // preserving auth credentials while adding our MCP servers.
-    //
-    // If opts.cwd is set, write config there (persistent, enables session resume).
-    // Otherwise, use the temp dir (ephemeral, no session resume).
+    // MCP servers → generated settings. Sandboxed embedders receive the
+    // config through Gemini's explicit system-settings override so the
+    // requested cwd remains unchanged and no project file is overwritten.
+    // Legacy callers without an artifact root retain workspace config behavior.
     let cwd_override = if let Some(servers) = &opts.mcp_servers {
         if !servers.is_empty() {
-            let config_dir = if let Some(cwd) = &opts.cwd {
-                std::path::PathBuf::from(cwd)
-            } else {
-                tmp_dir.path().to_path_buf()
-            };
-
-            let gemini_dir = config_dir.join(".gemini");
-            tokio::fs::create_dir_all(&gemini_dir)
-                .await
-                .map_err(Error::Io)?;
-
             let settings = build_mcp_settings(servers);
-            let settings_path = gemini_dir.join("settings.json");
+            let (settings_path, cwd_override) = if opts.artifact_dir.is_some() {
+                (tmp_dir.path().join("settings.json"), None)
+            } else {
+                let config_dir = opts
+                    .cwd
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| tmp_dir.path().to_path_buf());
+                let gemini_dir = config_dir.join(".gemini");
+                tokio::fs::create_dir_all(&gemini_dir)
+                    .await
+                    .map_err(Error::Io)?;
+                let cwd_override = opts
+                    .cwd
+                    .is_none()
+                    .then(|| tmp_dir.path().to_string_lossy().into_owned());
+                (gemini_dir.join("settings.json"), cwd_override)
+            };
             tokio::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)
                 .await
                 .map_err(Error::Io)?;
-
-            // If we wrote to opts.cwd, no override needed — the adapter
-            // already uses opts.cwd. If we wrote to temp dir, override cwd.
-            if opts.cwd.is_none() {
-                Some(tmp_dir.path().to_string_lossy().into_owned())
-            } else {
-                None
+            if opts.artifact_dir.is_some() {
+                env.insert(
+                    "GEMINI_CLI_SYSTEM_SETTINGS_PATH".into(),
+                    settings_path.to_string_lossy().into_owned(),
+                );
             }
+            cwd_override
         } else {
             None
         }
@@ -353,6 +356,34 @@ mod tests {
         let prompt_path = std::path::PathBuf::from(env.get("GEMINI_SYSTEM_MD").unwrap());
 
         assert!(prompt_path.starts_with(artifact_dir.path()));
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn generated_mcp_config_uses_owned_artifacts_without_touching_cwd() {
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let opts = RunOptions {
+            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
+            cwd: Some(cwd.path().to_string_lossy().into_owned()),
+            mcp_servers: Some(HashMap::from([(
+                "test".into(),
+                McpServer {
+                    command: Some("test-server".into()),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+
+        let (env, cwd_override, handle) = write_configs(&opts).await.unwrap();
+        let settings_path = std::path::PathBuf::from(
+            env.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH").unwrap(),
+        );
+
+        assert!(settings_path.starts_with(artifact_dir.path()));
+        assert_eq!(cwd_override, None);
+        assert!(!cwd.path().join(".gemini/settings.json").exists());
         drop(handle);
     }
 }

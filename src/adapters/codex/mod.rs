@@ -215,7 +215,7 @@ async fn write_configs(
     }
 
     let tmp_dir = crate::artifacts::temp_dir(opts, "cli-agents-codex-")?;
-    let codex_home = resolve_codex_home();
+    let codex_home = resolve_codex_home(opts);
     if let Some(home) = &codex_home {
         link_codex_home_contents(home, tmp_dir.path())?;
     }
@@ -258,10 +258,19 @@ async fn write_configs(
     Ok((env, Some(tmp_dir)))
 }
 
-fn resolve_codex_home() -> Option<PathBuf> {
-    std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+fn resolve_codex_home(opts: &RunOptions) -> Option<PathBuf> {
+    let configured = opts.env.as_ref().and_then(|env| {
+        env.get("CODEX_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env.get("HOME").map(|home| PathBuf::from(home).join(".codex")))
+    });
+    if configured.is_some() || opts.artifact_dir.is_some() {
+        return configured;
+    }
+
+    std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"))
+    })
 }
 
 /// Symlink top-level entries of `src` into `dst`, skipping `config.toml`
@@ -490,6 +499,36 @@ mod tests {
 
         assert!(codex_home.starts_with(artifact_dir.path()));
         drop(handle);
+    }
+
+    #[test]
+    fn owned_artifacts_never_import_the_ambient_codex_home() {
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let opts = RunOptions {
+            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        assert!(resolve_codex_home(&opts).is_none());
+    }
+
+    #[test]
+    fn owned_artifacts_use_only_the_explicit_child_codex_home() {
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let isolated_home = tempfile::tempdir().unwrap();
+        let opts = RunOptions {
+            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
+            env: Some(HashMap::from([(
+                "HOME".into(),
+                isolated_home.path().to_string_lossy().into_owned(),
+            )])),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_codex_home(&opts),
+            Some(isolated_home.path().join(".codex"))
+        );
     }
 
     #[tokio::test]
