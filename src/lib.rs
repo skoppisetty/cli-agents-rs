@@ -36,6 +36,7 @@
 //! ```
 
 pub mod adapters;
+mod artifacts;
 pub mod discovery;
 pub mod error;
 pub mod events;

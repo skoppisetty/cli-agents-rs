@@ -59,7 +59,7 @@ async fn main() {
 
 ```toml
 [dependencies]
-cli-agents = "0.2"
+cli-agents = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 

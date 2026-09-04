@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1 - 2026-09-03
+
+### Added
+- `RunOptions.clear_env` lets sandboxed embedders replace the inherited process environment with an explicit allowlist.
+- `RunOptions.artifact_dir` keeps generated provider-readable files inside a caller-owned runtime root.
+- `AntigravityOptions.state_dir` maps Antigravity's provider-state root into an embedder-owned directory without breaking OS keychain authentication.
+
+### Fixed
+- Claude prompt files and Codex generated configuration now honor `artifact_dir`; a missing owned root fails closed instead of falling back to ambient temporary storage.
+- Codex resolves source state from `RunOptions.env` first and does not import the parent process home when an owned artifact root is configured.
+
 ## 0.3.0 - 2026-08-31
 
 ### Changed
