@@ -44,7 +44,7 @@ process-wrap = { version = "8.2.1", features = ["tokio1", "creation-flags"] }
 # CREATE_NO_WINDOW comes from here, Windows-only. Pinned to the same `windows`
 # version process-wrap already compiles (0.61) so it is one crate, not two.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_System_Threading"] }
+windows = { version = "0.62", features = ["Win32_System_Threading"] }
 
 [features]
 default = []
