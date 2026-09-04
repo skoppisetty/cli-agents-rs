@@ -48,6 +48,7 @@ impl CliAdapter for CodexAdapter {
                 binary: &binary,
                 args: &args,
                 extra_env: &extra_env,
+                clear_env: opts.clear_env,
                 strip_env: &[],
                 cwd: opts.cwd.as_deref().unwrap_or("."),
                 max_bytes,
@@ -214,8 +215,8 @@ async fn write_configs(
         return Ok((HashMap::new(), None));
     }
 
-    let tmp_dir = tempfile::tempdir().map_err(Error::Io)?;
-    let codex_home = resolve_codex_home();
+    let tmp_dir = crate::artifacts::temp_dir(opts, "cli-agents-codex-")?;
+    let codex_home = resolve_codex_home(opts);
     if let Some(home) = &codex_home {
         link_codex_home_contents(home, tmp_dir.path())?;
     }
@@ -258,7 +259,17 @@ async fn write_configs(
     Ok((env, Some(tmp_dir)))
 }
 
-fn resolve_codex_home() -> Option<PathBuf> {
+fn resolve_codex_home(opts: &RunOptions) -> Option<PathBuf> {
+    let configured = opts.env.as_ref().and_then(|env| {
+        env.get("CODEX_HOME").map(PathBuf::from).or_else(|| {
+            env.get("HOME")
+                .map(|home| PathBuf::from(home).join(".codex"))
+        })
+    });
+    if configured.is_some() || opts.artifact_dir.is_some() {
+        return configured;
+    }
+
     std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
@@ -474,6 +485,52 @@ mod tests {
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("instructions"));
         assert!(content.contains("You are helpful."));
+    }
+
+    #[tokio::test]
+    async fn generated_config_uses_the_owned_artifact_directory() {
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let opts = RunOptions {
+            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
+            system_prompt: Some("owned prompt".into()),
+            ..Default::default()
+        };
+
+        let (env, handle) = write_configs(&opts).await.unwrap();
+        let codex_home = std::path::PathBuf::from(env.get("CODEX_HOME").unwrap());
+
+        assert!(codex_home.starts_with(artifact_dir.path()));
+        drop(handle);
+    }
+
+    #[test]
+    fn owned_artifacts_never_import_the_ambient_codex_home() {
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let opts = RunOptions {
+            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        assert!(resolve_codex_home(&opts).is_none());
+    }
+
+    #[test]
+    fn owned_artifacts_use_only_the_explicit_child_codex_home() {
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let isolated_home = tempfile::tempdir().unwrap();
+        let opts = RunOptions {
+            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
+            env: Some(HashMap::from([(
+                "HOME".into(),
+                isolated_home.path().to_string_lossy().into_owned(),
+            )])),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_codex_home(&opts),
+            Some(isolated_home.path().join(".codex"))
+        );
     }
 
     #[tokio::test]

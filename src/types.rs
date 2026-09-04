@@ -140,6 +140,13 @@ pub struct AntigravityOptions {
     pub sandbox: Option<bool>,
     /// Antigravity headless timeout (for example, `10m`).
     pub print_timeout: Option<String>,
+    /// Root directory for Antigravity's provider state.
+    ///
+    /// Maps to the CLI's `--gemini_dir` embedder flag. This lets a host keep
+    /// generated config, logs, conversations, and artifacts inside an owned
+    /// capability boundary while leaving `HOME` available for OS keychain
+    /// authentication.
+    pub state_dir: Option<String>,
     pub extra_args: Option<Vec<String>>,
 }
 
@@ -187,6 +194,21 @@ pub struct RunOptions {
 
     /// Extra environment variables for the CLI process.
     pub env: Option<HashMap<String, String>>,
+
+    /// Start the CLI process with an empty environment before applying `env`.
+    ///
+    /// Defaults to `false` for backwards compatibility. Sandboxed embedders
+    /// should set this to `true` and provide every variable the child requires.
+    #[serde(default)]
+    pub clear_env: bool,
+
+    /// Directory in which adapters create temporary provider-readable
+    /// artifacts such as prompt files and generated configuration.
+    ///
+    /// When omitted, adapters use the operating system temporary directory.
+    /// Sandboxed embedders should point this at a directory inside the child
+    /// process's capability boundary.
+    pub artifact_dir: Option<String>,
 
     /// Explicit path to the CLI executable (skips discovery).
     pub executable_path: Option<String>,

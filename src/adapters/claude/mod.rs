@@ -44,6 +44,7 @@ impl CliAdapter for ClaudeAdapter {
                 binary: &binary,
                 args: &args,
                 extra_env: &extra_env,
+                clear_env: opts.clear_env,
                 // Strip Anthropic API auth env vars so the CLI uses its own
                 // subscription credentials (OAuth/keychain). Without this, a
                 // user's shell `ANTHROPIC_API_KEY` would silently bill API
@@ -112,11 +113,7 @@ fn spill_append_system_prompt(
     let Some(text) = inline else {
         return Ok((opts.clone(), None));
     };
-    let mut file = tempfile::Builder::new()
-        .prefix("cli-agents-append-system-prompt-")
-        .suffix(".md")
-        .tempfile()
-        .map_err(Error::Io)?;
+    let mut file = crate::artifacts::prompt_file(opts, "cli-agents-append-system-prompt-", ".md")?;
     std::io::Write::write_all(&mut file, text.as_bytes()).map_err(Error::Io)?;
     let mut spilled = opts.clone();
     if let Some(co) = spilled.providers.as_mut().and_then(|p| p.claude.as_mut()) {
@@ -428,6 +425,36 @@ mod tests {
         };
         let (_, file) = spill_append_system_prompt(&opts).unwrap();
         assert!(file.is_none());
+    }
+
+    #[test]
+    fn spilled_prompt_uses_the_owned_artifact_directory() {
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let opts = RunOptions {
+            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
+            providers: Some(crate::types::ProviderOptions {
+                claude: Some(crate::types::ClaudeOptions {
+                    append_system_prompt: Some("owned prompt".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let (spilled, handle) = spill_append_system_prompt(&opts).unwrap();
+        let path = std::path::PathBuf::from(
+            spilled
+                .providers
+                .unwrap()
+                .claude
+                .unwrap()
+                .append_system_prompt_file
+                .unwrap(),
+        );
+
+        assert!(path.starts_with(artifact_dir.path()));
+        drop(handle);
     }
 
     #[test]

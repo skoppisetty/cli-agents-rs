@@ -40,6 +40,7 @@ impl CliAdapter for AntigravityAdapter {
                 binary: &binary,
                 args: &args,
                 extra_env: &extra_env,
+                clear_env: opts.clear_env,
                 strip_env: &[],
                 cwd: opts.cwd.as_deref().unwrap_or("."),
                 max_bytes,
@@ -126,7 +127,7 @@ fn is_reserved_arg(arg: &str) -> bool {
     let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
     matches!(
         flag,
-        "-p" | "--print" | "--prompt" | "--input-format" | "--output-format"
+        "-p" | "--print" | "--prompt" | "--input-format" | "--output-format" | "--gemini_dir"
     )
 }
 
@@ -172,6 +173,10 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
             args.push("--print-timeout".into());
             args.push(timeout.clone());
         }
+        if let Some(state_dir) = &options.state_dir {
+            args.push("--gemini_dir".into());
+            args.push(state_dir.clone());
+        }
         // Caller-supplied flags come last so newly added Antigravity options
         // remain usable without waiting for a crate release.
         if let Some(extra) = &options.extra_args {
@@ -213,6 +218,7 @@ mod tests {
                     agent: Some("reviewer".into()),
                     sandbox: Some(true),
                     print_timeout: Some("10m".into()),
+                    state_dir: Some("/owned/provider-state".into()),
                     extra_args: Some(vec!["--json-schema".into(), "string".into()]),
                 }),
                 ..Default::default()
@@ -231,6 +237,10 @@ mod tests {
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["--print-timeout", "10m"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--gemini_dir", "/owned/provider-state"])
         );
         assert!(
             args.windows(2)
@@ -304,6 +314,8 @@ mod tests {
             "--input-format=stream-json",
             "--output-format",
             "--output-format=json",
+            "--gemini_dir",
+            "--gemini_dir=/caller-state",
         ] {
             let opts = RunOptions {
                 task: "hello".into(),
