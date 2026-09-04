@@ -111,6 +111,20 @@ let opts = RunOptions {
 
 When a timeout fires or the failure limit is reached, the cancellation token is triggered and the process group is killed.
 
+## Sandboxed embedders
+
+Adapters may generate prompt and configuration files that the provider process must read. Set `artifact_dir` to a directory inside the provider's filesystem capability boundary:
+
+```rust
+let opts = RunOptions {
+    task: "Analyze this project.".into(),
+    artifact_dir: Some("/private/tmp/my-app/provider-runtime".into()),
+    ..Default::default()
+};
+```
+
+The directory must already exist. When it is supplied, generated artifacts never fall back to the ambient operating-system temp directory.
+
 ## Permission bypass
 
 By default, CLI permission prompts are **not** bypassed. Set `skip_permissions: true` to run in fully autonomous mode:

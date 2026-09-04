@@ -39,6 +39,7 @@ pub struct RunOptions {
     pub total_timeout_ms: Option<u64>,
     pub max_consecutive_tool_failures: Option<u32>,
     pub env: Option<HashMap<String, String>>,
+    pub artifact_dir: Option<String>,
     pub executable_path: Option<String>,
     pub resume_session_id: Option<String>,
     pub max_output_bytes: Option<usize>,
@@ -60,6 +61,7 @@ pub struct RunOptions {
 | `total_timeout_ms` | `None` | Total timeout in milliseconds |
 | `max_consecutive_tool_failures` | 3 | Max consecutive tool failures before aborting |
 | `env` | `None` | Extra environment variables for the CLI process |
+| `artifact_dir` | OS temp directory | Root for generated provider-readable artifacts; set this to a child-readable directory when embedding in a sandbox |
 | `executable_path` | `None` | Explicit path to the CLI binary (skips discovery — requires `cli` to be set) |
 | `resume_session_id` | `None` | Session ID to resume a previous conversation |
 | `max_output_bytes` | 10 MB | Per-line stdout retention cap; oversized lines are dropped, the run continues |

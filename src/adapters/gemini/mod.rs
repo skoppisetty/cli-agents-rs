@@ -162,7 +162,7 @@ async fn write_configs(
         return Ok((env, None, None));
     }
 
-    let tmp_dir = tempfile::tempdir().map_err(Error::Io)?;
+    let tmp_dir = crate::artifacts::temp_dir(opts, "cli-agents-gemini-")?;
     let mut env = HashMap::new();
 
     // MCP servers → workspace-level .gemini/settings.json.
@@ -338,5 +338,21 @@ mod tests {
         assert!(args.contains(&"--resume".to_string()));
         assert!(args.contains(&"--approval-mode".to_string()));
         assert!(args.contains(&"--verbose".to_string()));
+    }
+
+    #[tokio::test]
+    async fn generated_prompt_uses_the_owned_artifact_directory() {
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let opts = RunOptions {
+            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
+            system_prompt: Some("owned prompt".into()),
+            ..Default::default()
+        };
+
+        let (env, _, handle) = write_configs(&opts).await.unwrap();
+        let prompt_path = std::path::PathBuf::from(env.get("GEMINI_SYSTEM_MD").unwrap());
+
+        assert!(prompt_path.starts_with(artifact_dir.path()));
+        drop(handle);
     }
 }

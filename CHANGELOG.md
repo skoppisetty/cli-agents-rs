@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.19
+
+### Added
+- `RunOptions.artifact_dir` (`artifactDir`) lets sandboxed embedders choose the root for every temporary provider-readable artifact.
+
+### Fixed
+- Claude prompt spills, Codex generated homes, and Gemini generated prompts/configuration now use `artifact_dir` when supplied. Adapters return the filesystem error if that root is unavailable; they never fall back to the ambient OS temp directory.
+
 ## 0.2.18
 
 ### Fixed

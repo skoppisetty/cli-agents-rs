@@ -214,7 +214,7 @@ async fn write_configs(
         return Ok((HashMap::new(), None));
     }
 
-    let tmp_dir = tempfile::tempdir().map_err(Error::Io)?;
+    let tmp_dir = crate::artifacts::temp_dir(opts, "cli-agents-codex-")?;
     let codex_home = resolve_codex_home();
     if let Some(home) = &codex_home {
         link_codex_home_contents(home, tmp_dir.path())?;
@@ -474,6 +474,22 @@ mod tests {
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("instructions"));
         assert!(content.contains("You are helpful."));
+    }
+
+    #[tokio::test]
+    async fn generated_config_uses_the_owned_artifact_directory() {
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let opts = RunOptions {
+            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
+            system_prompt: Some("owned prompt".into()),
+            ..Default::default()
+        };
+
+        let (env, handle) = write_configs(&opts).await.unwrap();
+        let codex_home = std::path::PathBuf::from(env.get("CODEX_HOME").unwrap());
+
+        assert!(codex_home.starts_with(artifact_dir.path()));
+        drop(handle);
     }
 
     #[tokio::test]

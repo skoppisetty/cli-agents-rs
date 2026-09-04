@@ -182,6 +182,14 @@ pub struct RunOptions {
     /// Extra environment variables for the CLI process.
     pub env: Option<HashMap<String, String>>,
 
+    /// Directory in which adapters create temporary provider-readable
+    /// artifacts such as prompt files and generated configuration.
+    ///
+    /// When omitted, adapters use the operating system temporary directory.
+    /// Sandboxed embedders should point this at a directory inside the child
+    /// process's capability boundary.
+    pub artifact_dir: Option<String>,
+
     /// Explicit path to the CLI executable (skips discovery).
     pub executable_path: Option<String>,
 
