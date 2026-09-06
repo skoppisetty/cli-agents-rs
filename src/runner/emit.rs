@@ -131,7 +131,7 @@ impl EmitWrapper {
 
                     if !success {
                         let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-                        if count >= self.max_tool_failures {
+                        if self.max_tool_failures > 0 && count >= self.max_tool_failures {
                             if let Some(ref cb) = self.on_event {
                                 cb(StreamEvent::Error {
                                     message: format!(
@@ -252,6 +252,32 @@ mod tests {
             .filter(|e| matches!(e, StreamEvent::Error { .. }))
             .count();
         assert!(error_count >= 1);
+    }
+
+    #[tokio::test]
+    async fn zero_tool_failure_limit_never_cancels() {
+        let cancel = CancellationToken::new();
+        let (cb, _events) = event_collector();
+        let wrapper = EmitWrapper::new(Some(cb), 0, None, 0, cancel.clone());
+        let emit = wrapper.make_emit_fn();
+
+        for index in 0..10 {
+            let tool_id = format!("tool-{index}");
+            emit(StreamEvent::ToolStart {
+                tool_name: "recoverable-tool".into(),
+                tool_id: tool_id.clone(),
+                args: None,
+            });
+            emit(StreamEvent::ToolEnd {
+                tool_id,
+                success: false,
+                output: None,
+                error: Some("invalid arguments".into()),
+            });
+        }
+
+        assert!(!cancel.is_cancelled());
+        wrapper.cleanup();
     }
 
     #[tokio::test]

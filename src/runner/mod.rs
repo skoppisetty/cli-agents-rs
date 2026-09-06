@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use emit::EmitWrapper;
 
 const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000; // 5 minutes
-const DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES: u32 = 3;
+const DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES: u32 = 0;
 
 /// Handle returned by [`run()`] — allows awaiting the result or aborting.
 #[must_use = "the run will be abandoned if the handle is dropped"]

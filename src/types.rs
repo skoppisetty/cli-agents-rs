@@ -189,7 +189,7 @@ pub struct RunOptions {
     /// Total timeout in milliseconds. No default.
     pub total_timeout_ms: Option<u64>,
 
-    /// Max consecutive tool failures before aborting. Default: 3.
+    /// Max consecutive tool failures before aborting. Disabled when omitted or zero.
     pub max_consecutive_tool_failures: Option<u32>,
 
     /// Extra environment variables for the CLI process.

@@ -115,7 +115,7 @@ let opts = RunOptions {
 |-------|---------|-------------|
 | `idle_timeout_ms` | 300,000 (5 min) | Time without any event before the run is cancelled |
 | `total_timeout_ms` | None (unlimited) | Absolute time limit for the entire run |
-| `max_consecutive_tool_failures` | 3 | Number of consecutive tool failures before aborting |
+| `max_consecutive_tool_failures` | disabled | Number of consecutive tool failures before aborting; `0` disables the limit |
 | `max_output_bytes` | 10 MB | Per-line stdout retention cap — an oversized line is dropped (surfaced as a warning event) and the run continues; cumulative throughput is unbounded by design |
 
 When a timeout fires or the failure limit is reached, the cancellation token is triggered and the process group is killed.
