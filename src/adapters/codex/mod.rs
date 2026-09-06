@@ -96,6 +96,11 @@ impl CliAdapter for CodexAdapter {
 fn build_args(opts: &RunOptions) -> Vec<String> {
     let mut args = vec!["exec".into()];
 
+    if let Some(cwd) = &opts.cwd {
+        args.push("-C".into());
+        args.push(cwd.clone());
+    }
+
     // Resume a previous session if requested
     if let Some(session_id) = &opts.resume_session_id {
         args.push("resume".into());
@@ -108,11 +113,6 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
     if let Some(model) = &opts.model {
         args.push("--model".into());
         args.push(model.clone());
-    }
-
-    if let Some(cwd) = &opts.cwd {
-        args.push("-C".into());
-        args.push(cwd.clone());
     }
 
     let codex_opts = opts.providers.as_ref().and_then(|p| p.codex.as_ref());
@@ -388,12 +388,14 @@ mod tests {
         let opts = RunOptions {
             task: "continue working".into(),
             resume_session_id: Some("tid-abc123".into()),
+            cwd: Some("/tmp/project".into()),
             ..Default::default()
         };
         let args = build_args(&opts);
-        // Should be: exec resume <session_id> <task> --json
+        assert_eq!(args[0..3], ["exec", "-C", "/tmp/project"]);
         let resume_idx = args.iter().position(|a| a == "resume").unwrap();
         assert_eq!(args[resume_idx + 1], "tid-abc123");
+        assert_eq!(args[resume_idx + 2], "continue working");
     }
 
     #[test]
