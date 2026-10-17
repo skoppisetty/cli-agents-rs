@@ -201,19 +201,31 @@ async fn main() {
         })
     };
 
+    // Providers own separate process groups. Even with piped stdin the wrapper
+    // must translate parent termination into library cancellation and await
+    // cleanup; killing this wrapper alone would orphan the provider group.
+    #[cfg(unix)]
+    let shutdown = {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut interrupt = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+        let mut terminate = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        async move {
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let shutdown = async { let _ = tokio::signal::ctrl_c().await; };
     let handle = run(opts, Some(on_event));
-
-    // Only handle Ctrl+C when running as a top-level CLI (stdin is a terminal).
-    // When spawned as a subprocess, let the parent handle SIGINT — otherwise
-    // tokio::signal::ctrl_c() steals SIGINT from the parent's process group.
-    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        let cancel = handle.cancel.clone();
-        tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.ok();
-            eprintln!("\nCancelling...");
-            cancel.cancel();
-        });
-    }
+    let cancel = handle.cancel.clone();
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    tokio::spawn(async move {
+        shutdown.await;
+        if interactive { eprintln!("\nCancelling..."); }
+        cancel.cancel();
+    });
 
     match handle.result.await {
         Ok(Ok(result)) => {
