@@ -218,7 +218,7 @@ pub(crate) async fn spawn_and_stream(
     // at the end — a chatty CLI logging megabytes must not be held in full
     // for that. Chunked reads, not lines: a single unterminated line cannot
     // grow the buffer past the bound either.
-    let stderr_handle = tokio::spawn(async move {
+    let mut stderr_handle = tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
         let mut stderr = stderr;
         let mut buf: Vec<u8> = Vec::new();
@@ -273,7 +273,16 @@ pub(crate) async fn spawn_and_stream(
         }
     }
 
-    let status = Box::into_pin(child.wait()).await.map_err(Error::Io)?;
+    // EOF is only a stream boundary: providers may close stdout while they
+    // keep running. Cancellation must still own the process group until reaped.
+    let status = tokio::select! {
+        status = Box::into_pin(child.wait()) => status.map_err(Error::Io)?,
+        _ = cancel.cancelled() => {
+            kill_process_group(&mut child).await;
+            let _ = stderr_handle.await;
+            return Ok(SpawnOutcome::Cancelled);
+        }
+    };
     // `code()` is `None` for a signalled process. This used to be
     // `.unwrap_or(1)`, which reported a SIGKILL as a clean `exit 1` and left
     // callers with no way to recover the difference — the exact ambiguity that
@@ -284,7 +293,16 @@ pub(crate) async fn spawn_and_stream(
     let signal = std::os::unix::process::ExitStatusExt::signal(&status);
     #[cfg(not(unix))]
     let signal: Option<i32> = None;
-    let stderr_text = stderr_handle.await.unwrap_or_default();
+    // A descendant may retain stderr after the launcher exits. Keep the same
+    // cancellation authority while draining that last pipe as well.
+    let stderr_text = tokio::select! {
+        text = &mut stderr_handle => text.unwrap_or_default(),
+        _ = cancel.cancelled() => {
+            kill_process_group(&mut child).await;
+            let _ = stderr_handle.await;
+            return Ok(SpawnOutcome::Cancelled);
+        }
+    };
 
     Ok(SpawnOutcome::Done {
         exit_code,
@@ -469,6 +487,37 @@ mod tests {
             }
         ));
         assert_eq!(lines, vec!["unset|yes"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_after_stdout_eof_reaps_the_provider_group() {
+        for script in [
+            "exec 1>&-; (sleep 1; rm -f survivor) & sleep 10",
+            "exec 1>&-; (sleep 1; rm -f survivor) & exit 0",
+        ] {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("survivor");
+        std::fs::write(&marker, "alive").unwrap();
+        // Both descendants inherit closed stdout. The adapter reaches child.wait
+        // before cancellation; the delayed effect proves the entire group died.
+        let args = vec!["-c".to_string(), script.to_string()];
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let token = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            token.cancel();
+        });
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), spawn_and_stream(
+            SpawnParams { cli_label: "test", binary: "sh", args: &args,
+                extra_env: &HashMap::new(), clear_env: false, strip_env: &[],
+                cwd: dir.path().to_str().unwrap(), max_bytes: 1024, cancel: &cancel },
+            |_: &str| {},
+        )).await.expect("cancel must interrupt process wait after stdout EOF").expect("spawn");
+        assert!(matches!(outcome, SpawnOutcome::Cancelled));
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert!(marker.exists(), "a provider descendant outlived cancellation");
+        }
     }
 
     /// CANCELLING TAKES THE WHOLE TREE, not just the process we spawned.
