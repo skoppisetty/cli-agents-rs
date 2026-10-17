@@ -1,12 +1,17 @@
 use clap::Parser;
 use cli_agents::{CliName, RunOptions, StreamEvent, run};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::sync::Arc;
 
 /// Unified AI CLI framework for Claude, Codex, and Antigravity.
 #[derive(Parser)]
 #[command(name = "cli-agents", arg_required_else_help = true)]
 struct Args {
+    /// Read the complete library RunOptions JSON object from stdin.
+    /// Runtime fields are used unchanged; prompts and credentials stay out of argv.
+    #[arg(long, conflicts_with_all = ["cli", "model", "system", "append_system_prompt", "cwd", "skip_permissions", "discover", "task"])]
+    config_stdin: bool,
+
     /// Which CLI to use (auto-discovers if omitted)
     #[arg(long, value_parser = parse_cli_name)]
     cli: Option<CliName>,
@@ -48,14 +53,47 @@ struct Args {
 }
 
 fn parse_cli_name(s: &str) -> Result<CliName, String> {
-    match s {
-        "claude" => Ok(CliName::Claude),
-        "codex" => Ok(CliName::Codex),
-        "antigravity" => Ok(CliName::Antigravity),
-        other => Err(format!(
-            "unknown CLI '{other}': use claude, codex, or antigravity"
-        )),
+    serde_json::from_value(serde_json::Value::String(s.to_owned()))
+        .map_err(|_| "unsupported CLI provider".to_owned())
+}
+
+/// Decode the exact shared library contract, without reinterpreting provider options.
+fn run_options(args: &Args, input: impl Read) -> Result<RunOptions, &'static str> {
+    if args.config_stdin {
+        let opts: RunOptions = serde_json::from_reader(input)
+            .map_err(|_| "stdin must contain one valid RunOptions JSON object")?;
+        if opts.task.trim().is_empty() {
+            return Err("no task provided");
+        }
+        return Ok(opts);
     }
+    let task = args.task.join(" ");
+    if task.is_empty() {
+        return Err("no task provided. Run with --help for usage");
+    }
+    let system_prompt = match (&args.system, &args.append_system_prompt) {
+        (Some(base), Some(extra)) => Some(format!("{base}\n\n{extra}")),
+        (Some(base), None) => Some(base.clone()),
+        (None, Some(extra)) => Some(extra.clone()),
+        (None, None) => None,
+    };
+    Ok(RunOptions {
+        cli: args.cli,
+        task,
+        system_prompt,
+        cwd: args.cwd.clone(),
+        model: args.model.clone(),
+        skip_permissions: args.skip_permissions,
+        providers: Some(cli_agents::ProviderOptions {
+            claude: Some(cli_agents::ClaudeOptions {
+                include_partial_messages: Some(true),
+                append_system_prompt: args.append_system_prompt.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
 }
 
 #[tokio::main]
@@ -76,45 +114,14 @@ async fn main() {
         std::process::exit(0);
     }
 
-    let task = args.task.join(" ");
-    if task.is_empty() {
-        eprintln!("Error: no task provided. Run with --help for usage.");
-        std::process::exit(1);
-    }
-
-    let system_prompt = match (&args.system, &args.append_system_prompt) {
-        (Some(base), Some(extra)) => Some(format!("{base}\n\n{extra}")),
-        (Some(base), None) => Some(base.clone()),
-        (None, Some(extra)) => Some(extra.clone()),
-        (None, None) => None,
+    let opts = match run_options(&args, std::io::stdin().lock()) {
+        Ok(opts) => opts,
+        Err(message) => {
+            // Never format input JSON or serde errors: either can contain secrets.
+            eprintln!("Error: {message}");
+            std::process::exit(2);
+        }
     };
-
-    let opts = RunOptions {
-        cli: args.cli,
-        task,
-        system_prompt,
-        cwd: args.cwd,
-        model: args.model,
-        skip_permissions: args.skip_permissions,
-        providers: Some(cli_agents::ProviderOptions {
-            claude: Some(cli_agents::ClaudeOptions {
-                include_partial_messages: Some(true),
-                append_system_prompt: args.append_system_prompt.clone(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    let cli_label = args
-        .cli
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "auto".into());
-    eprintln!(
-        "Running with cli={cli_label}, skip_permissions={}",
-        args.skip_permissions
-    );
 
     let json_mode = args.json;
     let verbose = args.verbose;
@@ -223,5 +230,86 @@ async fn main() {
             eprintln!("Panic: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn stdin_preserves_the_complete_library_contract() {
+        let args = Args::try_parse_from(["cli-agents", "--config-stdin", "--json"]).unwrap();
+        let value = json!({
+            "cli": "claude", "task": "Inspect and edit", "systemPrompt": "instructions",
+            "model": "sonnet", "cwd": "/workspace", "resumeSessionId": "prior-session",
+            "env": {"EXAMPLE_CREDENTIAL": "private-value"}, "clearEnv": true,
+            "artifactDir": "/workspace/tmp", "idleTimeoutMs": 12000,
+            "totalTimeoutMs": 30000, "maxConsecutiveToolFailures": 7,
+            "maxOutputBytes": 4096, "skipPermissions": true,
+            "mcpServers": {"cueframe": {"url": "http://localhost:1234/mcp", "headers": {"authorization": "Bearer secret"}}},
+            "providers": {"claude": {"allowedTools": "mcp__cueframe__*", "agents": {"reviewer": {"description": "Review", "prompt": "Check edits"}}}}
+        });
+        let json = value.to_string();
+        let expected: RunOptions = serde_json::from_str(&json).unwrap();
+        let actual = run_options(&args, json.as_bytes()).unwrap();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn stdin_rejects_ambiguous_flag_and_positional_overrides() {
+        for flags in [
+            vec!["--cli", "claude"],
+            vec!["--model", "sonnet"],
+            vec!["--system", "override"],
+            vec!["--append-system-prompt", "extra"],
+            vec!["--cwd", "/tmp"],
+            vec!["--skip-permissions"],
+            vec!["--discover"],
+            vec!["task"],
+        ] {
+            let mut argv = vec!["cli-agents", "--config-stdin"];
+            argv.extend(flags);
+            assert!(Args::try_parse_from(argv).is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_input_diagnostics_never_echo_secrets() {
+        let args = Args::try_parse_from(["cli-agents", "--config-stdin"]).unwrap();
+        for input in [
+            "",
+            "{",
+            r#"{"task":"x","cli":"secret-token"}"#,
+            r#"{"task":""}"#,
+            r#"{"task":"valid"} {"secret":"extra"}"#,
+        ] {
+            let error = run_options(&args, input.as_bytes()).unwrap_err();
+            assert!(!error.contains("secret"));
+        }
+    }
+
+    #[test]
+    fn simple_mode_keeps_existing_prompt_behavior() {
+        let args = Args::try_parse_from([
+            "cli-agents",
+            "--cli",
+            "codex",
+            "--system",
+            "base",
+            "--append-system-prompt",
+            "extra",
+            "--",
+            "--literal-task",
+        ])
+        .unwrap();
+        let options = run_options(&args, std::io::empty()).unwrap();
+        assert_eq!(options.task, "--literal-task");
+        assert_eq!(options.system_prompt.as_deref(), Some("base\n\nextra"));
+        assert_eq!(options.cli, Some(CliName::Codex));
     }
 }
