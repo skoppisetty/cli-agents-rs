@@ -196,8 +196,21 @@ struct InvocationConfig {
 }
 
 async fn write_configs(opts: &RunOptions) -> Result<InvocationConfig> {
+    write_configs_scoped(opts, false).await
+}
+
+// Every app-server operation, including config-free read-only inspection, must
+// open the same provider state database as configured prepare/run operations.
+async fn write_configs_for_app_server(opts: &RunOptions) -> Result<InvocationConfig> {
+    write_configs_scoped(opts, true).await
+}
+
+async fn write_configs_scoped(
+    opts: &RunOptions,
+    always_snapshot: bool,
+) -> Result<InvocationConfig> {
     let system_prompt = resolve_system_prompt(opts).await?;
-    if opts.mcp_servers.is_none() && system_prompt.is_none() {
+    if !always_snapshot && opts.mcp_servers.is_none() && system_prompt.is_none() {
         return Ok(InvocationConfig::default());
     }
     let home = resolve_codex_home(opts).ok_or_else(|| {
@@ -656,6 +669,43 @@ mod tests {
         let config = write_configs(&RunOptions::default()).await.unwrap();
         assert!(config.args.is_empty());
         assert!(config.profile.is_none());
+    }
+
+    #[tokio::test]
+    async fn app_server_empty_overrides_preserve_base_and_auth_without_changing_exec_home() {
+        let home = tempfile::tempdir().unwrap();
+        let base =
+            "model = 'fixture-model'\n[model_providers.fixture]\nbase_url = 'http://127.0.0.1:1'\n";
+        std::fs::write(home.path().join("config.toml"), base).unwrap();
+        std::fs::write(home.path().join("auth.json"), "fixture auth bytes").unwrap();
+        let opts = scoped_options(&home);
+        let ordinary = write_configs(&opts).await.unwrap();
+        assert!(ordinary.home.is_none()); // existing child env keeps owner HOME
+        assert!(ordinary.profile.is_none());
+        assert!(ordinary.args.is_empty());
+        assert!(!home.path().join(".cli-agents-runtime").exists());
+        let app_server = write_configs_for_app_server(&opts).await.unwrap();
+        let expected_home = home
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join(".cli-agents-runtime");
+        assert_eq!(app_server.home.as_ref(), Some(&expected_home));
+        let table: toml::Table = toml::from_str(
+            &std::fs::read_to_string(app_server.profile.as_ref().unwrap().path()).unwrap(),
+        )
+        .unwrap();
+        let expected: toml::Table = toml::from_str(base).unwrap();
+        assert_eq!(table, expected);
+        assert_eq!(
+            std::fs::read_to_string(expected_home.join("auth.json")).unwrap(),
+            "fixture auth bytes"
+        );
+        assert!(!expected_home.join("config.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+            base
+        );
     }
 
     #[test]

@@ -554,7 +554,7 @@ async fn perform(
             "Provider operation cancelled before start".into(),
         ));
     }
-    let config = super::write_configs(options).await?;
+    let config = super::write_configs_for_app_server(options).await?;
     // app-server rejects --profile (including Codex's v2 profile files). Reuse
     // the complete private snapshot, but send its overrides through the official
     // thread/start and thread/resume config field. In particular MCP credentials
@@ -669,6 +669,7 @@ mod tests {
 import sys,json,os
 mode=os.environ.get('FAKE_MODE','completed')
 log=os.environ['FAKE_LOG'];state=os.environ['FAKE_STATE']
+if mode=='home-namespace':state=os.path.join(os.environ['CODEX_HOME'],'owned-history.json')
 if mode=='stdin-config':
  if '--profile' in sys.argv or any('fixture-secret' in a for a in sys.argv):sys.exit(2)
 
@@ -685,7 +686,10 @@ for line in sys.stdin:
   prompt=config.get('model_instructions_file')
   if not prompt or open(prompt).read()!='Fixture instructions':sys.exit(4)
  if m=='initialize':r={}
- elif m in ['thread/start','thread/resume','thread/read']:r={'thread':{'id':'foreign' if mode=='foreign' else 'thread-1','turns':[]}}
+ elif m in ['thread/start','thread/resume','thread/read']:
+  if mode=='home-namespace' and m=='thread/start':
+   with open(state,'w') as f:json.dump({'id':'turn-1','items':[{'type':'userMessage','clientId':'client-1'}],'status':'interrupted'},f)
+  r={'thread':{'id':'foreign' if mode=='foreign' else 'thread-1','turns':[]}}
  elif m=='turn/start':
   with open(state,'w') as f:json.dump({'id':'turn-1','items':[{'type':'userMessage','clientId':p['clientUserMessageId']},{'type':'agentMessage','id':'answer','text':'OK'}],'status':'completed'},f)
   if mode=='lost-ack':sys.exit(0)
@@ -700,7 +704,7 @@ for line in sys.stdin:
   if mode=='compacted':t['items'].append({'type':'contextCompaction'})
   if mode=='unknown-status':t['status']='made-up'
   if mode=='wrong-client':t['items'][0]['clientId']='other'
-  r={'data':[] if mode=='missing' else [t,t] if mode=='duplicate' else [t], 'nextCursor':'again' if mode=='cursor-loop' else None}
+  r={'data':[] if mode=='missing' or (mode=='home-namespace' and not os.path.exists(state)) else [t,t] if mode=='duplicate' else [t], 'nextCursor':'again' if mode=='cursor-loop' else None}
  else:emit({'id':q['id'],'error':{'code':-32601}});continue
  emit({'id':q['id'],'result':r})
 "#;
@@ -710,6 +714,10 @@ for line in sys.stdin:
         std::fs::write(&bin, PROVIDER).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let env = HashMap::from([
+            (
+                "CODEX_HOME".into(),
+                dir.path().join("owner").to_string_lossy().into(),
+            ),
             ("FAKE_MODE".into(), mode.into()),
             (
                 "FAKE_LOG".into(),
@@ -746,6 +754,48 @@ for line in sys.stdin:
             },
             task: "Say OK".into(),
         }
+    }
+    #[tokio::test]
+    async fn configured_prepare_and_config_free_inspect_share_one_persistent_home() {
+        let (dir, mut options) = fixture("home-namespace");
+        options.task.clear();
+        options.system_prompt = Some("Fixture instructions".into());
+        options.artifact_dir = Some(dir.path().to_string_lossy().into());
+        let prepared = perform(
+            CodexAppServerRequest::Prepare {
+                options: options.clone(),
+            },
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(prepared, CodexTurnObservation::Prepared { .. }));
+        assert!(
+            dir.path()
+                .join("owner/.cli-agents-runtime/owned-history.json")
+                .is_file()
+        );
+        options.system_prompt = None;
+        options.artifact_dir = None; // exact native inspection has no scratch override
+        let result = codex_app_server(
+            CodexAppServerRequest::Inspect {
+                options,
+                binding: binding(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, CodexTurnObservation::Observed { status, .. } if status == "interrupted")
+        );
+        assert!(!dir.path().join("owner/owned-history.json").exists());
+        let methods = std::fs::read_to_string(dir.path().join("methods")).unwrap();
+        assert!(!methods.contains("turn/start"));
+        assert!(!methods.contains("thread/resume"));
+        assert_eq!(methods.lines().filter(|m| *m == "thread/start").count(), 1);
     }
     #[tokio::test]
     async fn full_configuration_uses_private_stdin_for_start_and_resume() {
