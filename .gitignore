@@ -1,4 +1,5 @@
 /target
+.context/
 Cargo.lock
 .DS_Store
 

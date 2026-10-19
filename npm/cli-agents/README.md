@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/@cueframe/cli-agents.svg)](https://www.npmjs.com/package/@cueframe/cli-agents)
 [![CI](https://github.com/skoppisetty/cli-agents-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/skoppisetty/cli-agents-rs/actions/workflows/ci.yml)
 
-Prebuilt binaries for [cli-agents](https://github.com/skoppisetty/cli-agents-rs) — a unified interface for Claude Code, Codex, and Gemini CLIs.
+Prebuilt binaries for [cli-agents](https://github.com/skoppisetty/cli-agents-rs) — a unified interface for Claude Code, Codex, and Antigravity CLIs.
 
 ## Install
 
@@ -16,7 +16,7 @@ This installs the `cli-agents` binary for your platform. No Rust toolchain neede
 ## Usage
 
 ```bash
-# Auto-discovers installed CLI (Claude > Codex > Gemini)
+# Auto-discovers installed CLI (Claude > Codex > Antigravity)
 cli-agents --cwd ./my-project "Summarize this project"
 
 # Use a specific CLI
@@ -35,7 +35,7 @@ You need at least one AI CLI installed:
 
 - [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) — `npm install -g @anthropic-ai/claude-code`
 - [Codex](https://www.npmjs.com/package/@openai/codex) — `npm install -g @openai/codex`
-- [Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli) — `npm install -g @google/gemini-cli`
+- [Antigravity CLI](https://antigravity.google/docs/cli/install/) — `curl -fsSL https://antigravity.google/cli/install.sh | bash`
 
 ## Platforms
 

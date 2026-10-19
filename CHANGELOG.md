@@ -1,23 +1,22 @@
 # Changelog
 
-## 0.2.21
-
-- Add an opt-in `clearEnv` process policy so sandboxed embedders can prevent
-  parent-process secrets and behavior-changing variables from reaching a CLI.
-
-## 0.2.20
-
-### Fixed
-- Codex config generation now resolves source state from `RunOptions.env` first and never imports the parent process's home when `artifact_dir` is set.
-- Gemini MCP settings use its explicit system-settings path when `artifact_dir` is set, keeping generated configuration inside the owned root without changing or writing to the requested working directory.
-
-## 0.2.19
+## 0.3.1 - 2026-09-03
 
 ### Added
-- `RunOptions.artifact_dir` (`artifactDir`) lets sandboxed embedders choose the root for every temporary provider-readable artifact.
+- `RunOptions.clear_env` lets sandboxed embedders replace the inherited process environment with an explicit allowlist.
+- `RunOptions.artifact_dir` keeps generated provider-readable files inside a caller-owned runtime root.
+- `AntigravityOptions.state_dir` maps Antigravity's provider-state root into an embedder-owned directory without breaking OS keychain authentication.
 
 ### Fixed
-- Claude prompt spills, Codex generated homes, and Gemini generated prompts/configuration now use `artifact_dir` when supplied. Adapters return the filesystem error if that root is unavailable; they never fall back to the ambient OS temp directory.
+- Claude prompt files and Codex generated configuration now honor `artifact_dir`; a missing owned root fails closed instead of falling back to ambient temporary storage.
+- Codex resolves source state from `RunOptions.env` first and does not import the parent process home when an owned artifact root is configured.
+
+## 0.3.0 - 2026-08-31
+
+### Changed
+- Replaced the deprecated Gemini CLI provider with Google Antigravity CLI support. The new adapter discovers `agy`, parses its headless NDJSON stream, and supports conversation resumption, model/effort/agent selection, sandboxing, and permission bypass.
+- The public provider API is now `CliName::Antigravity`, `AntigravityOptions`, and `ProviderOptions::antigravity`. The command-line selector is `--cli antigravity`.
+- Antigravity uses its existing global/workspace MCP configuration. Per-run `mcp_servers` are rejected because the CLI has no config-path override; the adapter never overwrites user configuration or changes the requested working directory.
 
 ## 0.2.18
 

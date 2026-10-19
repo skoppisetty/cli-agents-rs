@@ -29,14 +29,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unavailable_owned_root_is_an_error_not_an_ambient_fallback() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+    fn unavailable_owned_root_is_an_error_not_an_ambient_fallback() {
         let missing = std::env::temp_dir().join(format!(
-            "cli-agents-missing-artifact-root-{}-{nonce}",
-            std::process::id()
+            "cli-agents-missing-artifact-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let opts = RunOptions {
             artifact_dir: Some(missing.to_string_lossy().into_owned()),

@@ -2,7 +2,7 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("no AI CLI found — install claude, codex, or gemini")]
+    #[error("no AI CLI found — install claude, codex, or antigravity")]
     NoCli,
 
     #[error("must specify `cli` when using `executable_path`")]

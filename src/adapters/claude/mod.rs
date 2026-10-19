@@ -62,6 +62,7 @@ impl CliAdapter for ClaudeAdapter {
             crate::adapters::SpawnOutcome::Cancelled => Ok(RunResult {
                 success: false,
                 text: Some("Cancelled.".into()),
+                session_id: state.session_id,
                 ..Default::default()
             }),
             crate::adapters::SpawnOutcome::Done {

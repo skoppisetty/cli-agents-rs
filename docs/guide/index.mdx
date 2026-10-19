@@ -14,7 +14,7 @@ You need at least one supported AI CLI installed on the system where your app ru
 |-----|---------|
 | Claude Code | `npm install -g @anthropic-ai/claude-code` |
 | Codex | `npm install -g @openai/codex` |
-| Gemini CLI | `npm install -g @google/gemini-cli` |
+| Antigravity CLI | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` |
 
 ## Installation
 
@@ -73,7 +73,7 @@ async fn main() {
 
 ### Auto-discovery
 
-Omit the `cli` field to auto-discover the first available agent. The priority order is Claude → Codex → Gemini:
+Omit the `cli` field to auto-discover the first available agent. The priority order is Claude → Codex → Antigravity:
 
 ```rust
 let opts = RunOptions {
