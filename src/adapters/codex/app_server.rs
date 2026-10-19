@@ -79,6 +79,7 @@ struct Connection {
     notification_bytes: usize,
     initialized: bool,
     prepared_thread: Option<String>,
+    thread_config: Option<Value>,
     next_id: u64,
     cap: usize,
     closed: bool,
@@ -236,7 +237,8 @@ impl Connection {
                     let result = self
                         .request(
                             "thread/resume",
-                            json!({"threadId":existing,"cwd":options.cwd,"model":options.model}),
+                            json!({"threadId":existing,"cwd":options.cwd,"model":options.model,
+                            "config":self.thread_config}),
                         )
                         .await?;
                     if result.pointer("/thread/id").and_then(Value::as_str)
@@ -249,7 +251,8 @@ impl Connection {
                     self.request(
                         "thread/start",
                         json!({"cwd":options.cwd,"model":options.model,
-                        "approvalPolicy":"never","sandbox":"read-only","ephemeral":false}),
+                        "approvalPolicy":"never","sandbox":"read-only","ephemeral":false,
+                        "config":self.thread_config}),
                     )
                     .await?
                 };
@@ -270,7 +273,7 @@ impl Connection {
                         .request(
                             "thread/resume",
                             json!({"threadId":binding.thread_id,
-                    "cwd":options.cwd,"model":options.model}),
+                    "cwd":options.cwd,"model":options.model,"config":self.thread_config}),
                         )
                         .await?;
                     if resumed.pointer("/thread/id").and_then(Value::as_str)
@@ -552,6 +555,23 @@ async fn perform(
         ));
     }
     let config = super::write_configs(options).await?;
+    // app-server rejects --profile (including Codex's v2 profile files). Reuse
+    // the complete private snapshot, but send its overrides through the official
+    // thread/start and thread/resume config field. In particular MCP credentials
+    // must not enter argv or a shared mutable config.toml. Keep `config` alive so
+    // its temporary instruction file remains available throughout this operation.
+    let thread_config = config
+        .profile
+        .as_ref()
+        .map(|profile| -> Result<Value> {
+            let content = std::fs::read_to_string(profile.path()).map_err(Error::Io)?;
+            let table: toml::Table = toml::from_str(&content).map_err(|_| {
+                Error::Other("Invalid private Codex invocation configuration".into())
+            })?;
+            serde_json::to_value(table)
+                .map_err(|_| Error::Other("Cannot serialize Codex thread configuration".into()))
+        })
+        .transpose()?;
     let binary = match &options.executable_path {
         Some(s) => s.clone(),
         None => crate::discovery::discover_binary(crate::CliName::Codex)
@@ -563,10 +583,7 @@ async fn perform(
         environment.insert("CODEX_HOME".into(), home.to_string_lossy().into());
     }
     let mut wrap = TokioCommandWrap::with_new(binary, |cmd| {
-        cmd.args(&config.args)
-            .arg("app-server")
-            .arg("--listen")
-            .arg("stdio://");
+        cmd.arg("app-server").arg("--listen").arg("stdio://");
         if options.clear_env {
             cmd.env_clear();
         }
@@ -605,6 +622,7 @@ async fn perform(
         notification_bytes: 0,
         initialized: false,
         prepared_thread: None,
+        thread_config,
         next_id: 0,
         closed: false,
         progress,
@@ -651,6 +669,9 @@ mod tests {
 import sys,json,os
 mode=os.environ.get('FAKE_MODE','completed')
 log=os.environ['FAKE_LOG'];state=os.environ['FAKE_STATE']
+if mode=='stdin-config':
+ if '--profile' in sys.argv or any('fixture-secret' in a for a in sys.argv):sys.exit(2)
+
 def emit(v): print(json.dumps(v),flush=True)
 for line in sys.stdin:
  q=json.loads(line);m=q['method'];p=q.get('params',{})
@@ -658,6 +679,11 @@ for line in sys.stdin:
  if 'id' not in q:continue
  if mode=='unsupported':emit({'id':q['id'],'error':{'code':-32601}});continue
  if mode=='malformed':print('bad-json',flush=True);continue
+ if mode=='stdin-config' and m in ['thread/start','thread/resume']:
+  config=p.get('config',{})
+  if config.get('mcp_servers',{}).get('cueframe',{}).get('http_headers',{}).get('Authorization')!='Bearer fixture-secret':sys.exit(3)
+  prompt=config.get('model_instructions_file')
+  if not prompt or open(prompt).read()!='Fixture instructions':sys.exit(4)
  if m=='initialize':r={}
  elif m in ['thread/start','thread/resume','thread/read']:r={'thread':{'id':'foreign' if mode=='foreign' else 'thread-1','turns':[]}}
  elif m=='turn/start':
@@ -719,6 +745,71 @@ for line in sys.stdin:
                 ..binding()
             },
             task: "Say OK".into(),
+        }
+    }
+    #[tokio::test]
+    async fn full_configuration_uses_private_stdin_for_start_and_resume() {
+        for scenario in ["start", "resume", "run"] {
+            let resume = scenario == "resume";
+            let (dir, mut options) = fixture("stdin-config");
+            let home = dir.path().join("owner");
+            std::fs::create_dir_all(&home).unwrap();
+            options
+                .env
+                .as_mut()
+                .unwrap()
+                .insert("CODEX_HOME".into(), home.to_string_lossy().into());
+            options.system_prompt = Some("Fixture instructions".into());
+            options.artifact_dir = Some(dir.path().to_string_lossy().into());
+            options.mcp_servers = Some(HashMap::from([(
+                "cueframe".into(),
+                crate::McpServer {
+                    url: Some("http://127.0.0.1:1/mcp".into()),
+                    transport_type: Some(crate::McpTransport::Http),
+                    headers: Some(HashMap::from([(
+                        "Authorization".into(),
+                        "Bearer fixture-secret".into(),
+                    )])),
+                    ..Default::default()
+                },
+            )]));
+            if resume {
+                options.resume_session_id = Some("thread-1".into());
+            }
+            let request = if scenario == "run" {
+                CodexAppServerRequest::Run {
+                    options,
+                    binding: binding(),
+                }
+            } else {
+                CodexAppServerRequest::Prepare { options }
+            };
+            let result = perform(request, CancellationToken::new(), None, None)
+                .await
+                .unwrap();
+            if scenario == "run" {
+                assert!(
+                    matches!(result, CodexTurnObservation::Observed { .. }),
+                    "{result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, CodexTurnObservation::Prepared { .. }),
+                    "{result:?}"
+                );
+            }
+            let methods = std::fs::read_to_string(dir.path().join("methods")).unwrap();
+            assert!(methods.contains(if resume || scenario == "run" {
+                "thread/resume"
+            } else {
+                "thread/start"
+            }));
+            assert_eq!(
+                methods.lines().filter(|m| *m == "turn/start").count(),
+                usize::from(scenario == "run")
+            );
+            assert!(!home.join("config.toml").exists());
+            assert!(!home.join(".cli-agents-runtime/config.toml").exists());
         }
     }
     #[tokio::test]
