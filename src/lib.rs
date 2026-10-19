@@ -59,3 +59,6 @@ pub use types::{
     ClaudeOptions, CliName, CodexOptions, GeminiOptions, McpServer, McpTransport, ProviderOptions,
     RunOptions, RunResult, RunStats, SettingSource,
 };
+
+/// Official opt-in provider correlation/inspection primitives; no automatic redispatch.
+pub use adapters::{codex_app_server, codex_app_server_with_progress, prepare_codex_turn, prepare_codex_turn_with_progress, CodexProgress, CodexAdmission, CodexPreparedRun, CodexAppServerRequest, CodexTurnBinding, CodexTurnObservation};

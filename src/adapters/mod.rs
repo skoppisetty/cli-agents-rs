@@ -4,6 +4,7 @@ mod gemini;
 
 pub use claude::ClaudeAdapter;
 pub use codex::CodexAdapter;
+pub use codex::app_server::{codex_app_server, codex_app_server_with_progress, prepare_codex_turn, prepare_codex_turn_with_progress, CodexProgress, CodexAdmission, CodexPreparedRun, CodexAppServerRequest, CodexTurnBinding, CodexTurnObservation};
 pub use gemini::GeminiAdapter;
 
 use crate::error::{Error, Result};
