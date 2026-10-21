@@ -59,7 +59,7 @@ pub struct RunOptions {
 | `model` | `None` | Model name (e.g. `"sonnet"`, `"o3"`, `"gemini-2.0-flash"`) |
 | `idle_timeout_ms` | 300,000 | Idle timeout in milliseconds |
 | `total_timeout_ms` | `None` | Total timeout in milliseconds |
-| `max_consecutive_tool_failures` | disabled | Max consecutive tool failures before aborting; `0` disables the limit |
+| `max_consecutive_tool_failures` | 3 | Max consecutive tool failures before aborting; `0` disables the limit |
 | `env` | `None` | Extra environment variables for the CLI process |
 | `artifact_dir` | OS temp directory | Root for generated provider-readable artifacts; set this to a child-readable directory when embedding in a sandbox |
 | `executable_path` | `None` | Explicit path to the CLI binary (skips discovery — requires `cli` to be set) |

@@ -9,7 +9,76 @@ use std::sync::Arc;
 use std::{collections::VecDeque, process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
+
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60_000;
+const MAX_REQUEST_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_TURN_IDLE_TIMEOUT_MS: u64 = 300_000;
+
+/// Control requests (initialize, thread start/resume, admission, inspection)
+/// share one bound; the turn itself runs under the caller's run limits.
+#[derive(Clone, Copy)]
+struct Limits {
+    request: Duration,
+    turn_total: Option<Duration>,
+    turn_idle: Option<Duration>,
+}
+
+impl Limits {
+    fn from_options(options: &RunOptions) -> Self {
+        let request = options
+            .providers
+            .as_ref()
+            .and_then(|p| p.codex.as_ref())
+            .and_then(|c| c.app_server_request_timeout_ms)
+            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS)
+            .clamp(1, MAX_REQUEST_TIMEOUT_MS);
+        let idle = options
+            .idle_timeout_ms
+            .unwrap_or(DEFAULT_TURN_IDLE_TIMEOUT_MS);
+        Self {
+            request: Duration::from_millis(request),
+            turn_total: options.total_timeout_ms.map(Duration::from_millis),
+            turn_idle: (idle > 0).then(|| Duration::from_millis(idle)),
+        }
+    }
+}
+
+async fn within<T>(
+    limit: Option<Instant>,
+    io: impl std::future::Future<Output = std::io::Result<T>>,
+) -> Option<std::io::Result<T>> {
+    match limit {
+        None => Some(io.await),
+        Some(at) => tokio::time::timeout_at(at, io).await.ok(),
+    }
+}
+
+/// Approval and sandbox from `CodexOptions`, with the same vocabulary as exec.
+/// Without options the thread is `never` + `read-only`.
+fn thread_policy(options: &RunOptions) -> (&'static str, String) {
+    let codex = options.providers.as_ref().and_then(|p| p.codex.as_ref());
+    let policy = codex
+        .and_then(|c| c.approval_policy.as_deref())
+        .filter(|p| !p.is_empty());
+    let approval = match policy {
+        Some("full-auto") => "on-request",
+        None | Some("suggest" | "auto-edit") => "never",
+        Some(other) => {
+            warn!(policy = other, "unknown Codex approval policy, ignoring");
+            "never"
+        }
+    };
+    let sandbox = match codex.and_then(|c| c.sandbox_mode.clone()) {
+        Some(mode) => mode,
+        None if policy == Some("full-auto") => "workspace-write".into(),
+        None if options.skip_permissions && policy.is_none() => "danger-full-access".into(),
+        None => "read-only".into(),
+    };
+    (approval, sandbox)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -53,6 +122,9 @@ pub enum CodexTurnObservation {
     },
     Uncertain {
         reason: String,
+        /// Bounded tail of the provider's stderr, when it wrote any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stderr: Option<String>,
     },
 }
 impl PartialEq for CodexTurnBinding {
@@ -65,6 +137,7 @@ impl PartialEq for CodexTurnBinding {
 fn uncertain(reason: &str) -> CodexTurnObservation {
     CodexTurnObservation::Uncertain {
         reason: reason.into(),
+        stderr: None,
     }
 }
 fn valid_id(s: &str) -> bool {
@@ -86,6 +159,10 @@ struct Connection {
     progress: Option<CodexProgress>,
     parse_state: super::parse::ParseState,
     text_tracker: HashMap<String, String>,
+    limits: Limits,
+    phase_deadline: Option<Instant>,
+    phase_idle: Option<Duration>,
+    deadline_exceeded: bool,
 }
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -96,19 +173,55 @@ impl Drop for Connection {
     }
 }
 impl Connection {
+    fn request_phase(&mut self) {
+        self.phase_deadline = Some(Instant::now() + self.limits.request);
+        self.phase_idle = None;
+    }
+    fn turn_phase(&mut self) {
+        self.phase_deadline = self.limits.turn_total.map(|d| Instant::now() + d);
+        self.phase_idle = self.limits.turn_idle;
+    }
+    /// The earlier of the phase deadline and the idle bound, measured from now.
+    fn wait_limit(&self) -> Option<Instant> {
+        let idle = self.phase_idle.map(|d| Instant::now() + d);
+        match (self.phase_deadline, idle) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+    /// `None` marks an elapsed deadline, which leaves the provider in an unknown state.
+    fn settle<T>(&mut self, done: Option<std::io::Result<T>>) -> Result<T> {
+        match done {
+            Some(result) => result.map_err(Error::Io),
+            None => {
+                self.deadline_exceeded = true;
+                Err(Error::Other("Codex app-server deadline exceeded".into()))
+            }
+        }
+    }
     async fn send(&mut self, value: Value) -> Result<()> {
         let mut bytes = serde_json::to_vec(&value)?;
         bytes.push(b'\n');
-        self.input.write_all(&bytes).await?;
-        self.input.flush().await?;
-        Ok(())
+        let limit = self.wait_limit();
+        let input = &mut self.input;
+        let done = within(limit, async move {
+            input.write_all(&bytes).await?;
+            input.flush().await
+        })
+        .await;
+        self.settle(done)
     }
     async fn read(&mut self) -> Result<Value> {
-        let mut line = Vec::new();
-        (&mut self.output)
-            .take(self.cap as u64 + 1)
-            .read_until(b'\n', &mut line)
-            .await?;
+        let limit = self.wait_limit();
+        let cap = self.cap as u64 + 1;
+        let output = &mut self.output;
+        let done = within(limit, async move {
+            let mut line = Vec::new();
+            output.take(cap).read_until(b'\n', &mut line).await?;
+            Ok(line)
+        })
+        .await;
+        let line = self.settle(done)?;
         if line.len() > self.cap || !line.ends_with(b"\n") {
             return Err(Error::Other(
                 "Codex app-server closed or exceeded message bound".into(),
@@ -216,6 +329,7 @@ impl Connection {
         Ok(uncertain("history_bound_exceeded"))
     }
     async fn operation(&mut self, request: &CodexAppServerRequest) -> Result<CodexTurnObservation> {
+        self.request_phase();
         if !self.initialized {
             self.request(
             "initialize",
@@ -228,6 +342,7 @@ impl Connection {
         }
         match request {
             CodexAppServerRequest::Prepare { options } => {
+                let (approval, sandbox) = thread_policy(options);
                 let result = if let Some(existing) = &options.resume_session_id {
                     if !valid_id(existing) {
                         return Err(Error::Other(
@@ -238,6 +353,7 @@ impl Connection {
                         .request(
                             "thread/resume",
                             json!({"threadId":existing,"cwd":options.cwd,"model":options.model,
+                            "approvalPolicy":approval,"sandbox":sandbox,
                             "config":self.thread_config}),
                         )
                         .await?;
@@ -251,7 +367,7 @@ impl Connection {
                     self.request(
                         "thread/start",
                         json!({"cwd":options.cwd,"model":options.model,
-                        "approvalPolicy":"never","sandbox":"read-only","ephemeral":false,
+                        "approvalPolicy":approval,"sandbox":sandbox,"ephemeral":false,
                         "config":self.thread_config}),
                     )
                     .await?
@@ -267,13 +383,15 @@ impl Connection {
             }
             CodexAppServerRequest::Inspect { binding, .. } => self.inspect(binding).await,
             CodexAppServerRequest::Run { options, binding } => {
+                let (approval, sandbox) = thread_policy(options);
                 // Resume loads an already bound thread; the ONLY model dispatch is turn/start below.
                 if self.prepared_thread.as_deref() != Some(binding.thread_id.as_str()) {
                     let resumed = self
                         .request(
                             "thread/resume",
                             json!({"threadId":binding.thread_id,
-                    "cwd":options.cwd,"model":options.model,"config":self.thread_config}),
+                    "cwd":options.cwd,"model":options.model,
+                    "approvalPolicy":approval,"sandbox":sandbox,"config":self.thread_config}),
                         )
                         .await?;
                     if resumed.pointer("/thread/id").and_then(Value::as_str)
@@ -289,7 +407,7 @@ impl Connection {
                         json!({"threadId":binding.thread_id,
                     "clientUserMessageId":binding.client_message_id,
                     "input":[{"type":"text","text":options.task,"text_elements":[]}],
-                    "approvalPolicy":"never"}),
+                    "approvalPolicy":approval}),
                     )
                     .await?;
                 let turn_id = result
@@ -301,6 +419,7 @@ impl Connection {
                 if binding.turn_id.as_ref().is_some_and(|id| id != &turn_id) {
                     return Ok(uncertain("turn_identity_mismatch"));
                 }
+                self.turn_phase();
                 loop {
                     let value = match self.notifications.pop_front() {
                         Some(v) => {
@@ -328,6 +447,7 @@ impl Connection {
                             == Some(turn_id.as_str())
                     {
                         // Return only persisted exact-client correlation, not just a notification.
+                        self.request_phase();
                         return self
                             .inspect(&CodexTurnBinding {
                                 turn_id: Some(turn_id),
@@ -555,19 +675,15 @@ async fn perform(
         ));
     }
     let config = super::write_configs_for_app_server(options).await?;
-    // app-server rejects --profile (including Codex's v2 profile files). Reuse
-    // the complete private snapshot, but send its overrides through the official
-    // thread/start and thread/resume config field. In particular MCP credentials
-    // must not enter argv or a shared mutable config.toml. Keep `config` alive so
-    // its temporary instruction file remains available throughout this operation.
+    // app-server rejects --profile (including Codex's v2 profile files). Send
+    // the complete snapshot through the official thread/start and thread/resume
+    // config field instead, so MCP credentials never enter argv or a file. Keep
+    // `config` alive so its temporary instruction file remains available
+    // throughout this operation.
     let thread_config = config
-        .profile
+        .table
         .as_ref()
-        .map(|profile| -> Result<Value> {
-            let content = std::fs::read_to_string(profile.path()).map_err(Error::Io)?;
-            let table: toml::Table = toml::from_str(&content).map_err(|_| {
-                Error::Other("Invalid private Codex invocation configuration".into())
-            })?;
+        .map(|table| {
             serde_json::to_value(table)
                 .map_err(|_| Error::Other("Cannot serialize Codex thread configuration".into()))
         })
@@ -591,7 +707,7 @@ async fn perform(
             .current_dir(options.cwd.as_deref().unwrap_or("."))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
     });
     #[cfg(unix)]
@@ -614,6 +730,12 @@ async fn perform(
         .stdout()
         .take()
         .ok_or_else(|| Error::Other("Missing provider stdout".into()))?;
+    let mut stderr_tail = crate::adapters::collect_stderr_tail(
+        child
+            .stderr()
+            .take()
+            .ok_or_else(|| Error::Other("Missing provider stderr".into()))?,
+    );
     let mut connection = Connection {
         child,
         input,
@@ -628,37 +750,72 @@ async fn perform(
         progress,
         parse_state: super::parse::ParseState::default(),
         text_tracker: HashMap::new(),
+        limits: Limits::from_options(options),
+        phase_deadline: None,
+        phase_idle: None,
+        deadline_exceeded: false,
         cap: options
             .max_output_bytes
             .unwrap_or(crate::DEFAULT_MAX_OUTPUT_BYTES)
             .clamp(1024, crate::DEFAULT_MAX_OUTPUT_BYTES),
     };
-    let deadline =
-        Duration::from_millis(options.total_timeout_ms.unwrap_or(60_000).clamp(1, 300_000));
-    let outcome = tokio::select! {
-        _ = cancel.cancelled() => Ok(uncertain("cancelled_requires_inspection")),
-        result = tokio::time::timeout(deadline, async {
-            if let Some(admit) = admission {
-                let prepared = connection.operation(&request).await?;
-                let CodexTurnObservation::Prepared { thread_id } = prepared else { return Ok(uncertain("prepare_failed")); };
-                let ack = admit(thread_id.clone()).await?;
-                if ack.binding.thread_id != thread_id || !valid_id(&ack.binding.client_message_id) || ack.binding.turn_id.is_some() || ack.task.trim().is_empty() {
-                    return Err(Error::Other("Admission did not acknowledge prepared identity".into()));
-                }
-                connection.prepared_thread = Some(thread_id);
-                let mut options = options.clone(); options.task = ack.task;
-                connection.operation(&CodexAppServerRequest::Run { options, binding: ack.binding }).await
-            } else { connection.operation(&request).await }
-        }) => match result {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(_)) => Ok(uncertain("provider_transport_or_protocol_failure")),
-            Err(_) => Ok(uncertain("provider_deadline_requires_inspection")),
-        },
+    let request_limit = connection.limits.request;
+    let finished = tokio::select! {
+        _ = cancel.cancelled() => None,
+        result = async {
+            let Some(admit) = admission else {
+                return connection.operation(&request).await;
+            };
+            let prepared = connection.operation(&request).await?;
+            let CodexTurnObservation::Prepared { thread_id } = prepared else {
+                return Ok(uncertain("prepare_failed"));
+            };
+            let Ok(ack) = tokio::time::timeout(request_limit, admit(thread_id.clone())).await else {
+                connection.deadline_exceeded = true;
+                return Err(Error::Other("Admission acknowledgement deadline exceeded".into()));
+            };
+            let ack = ack?;
+            if ack.binding.thread_id != thread_id
+                || !valid_id(&ack.binding.client_message_id)
+                || ack.binding.turn_id.is_some()
+                || ack.task.trim().is_empty()
+            {
+                return Err(Error::Other("Admission did not acknowledge prepared identity".into()));
+            }
+            connection.prepared_thread = Some(thread_id);
+            let mut options = options.clone();
+            options.task = ack.task;
+            connection
+                .operation(&CodexAppServerRequest::Run { options, binding: ack.binding })
+                .await
+        } => Some(result),
+    };
+    let outcome = match finished {
+        None => uncertain("cancelled_requires_inspection"),
+        Some(Ok(value)) => value,
+        Some(Err(_)) if connection.deadline_exceeded => {
+            uncertain("provider_deadline_requires_inspection")
+        }
+        Some(Err(_)) => uncertain("provider_transport_or_protocol_failure"),
     };
     let _ = Box::into_pin(connection.child.kill()).await;
     let _ = Box::into_pin(connection.child.wait()).await;
     connection.closed = true;
-    outcome
+    // A descendant outside the group may still hold stderr; never wait on it long.
+    let stderr = match tokio::time::timeout(Duration::from_secs(1), &mut stderr_tail).await {
+        Ok(Ok(text)) if !text.is_empty() => Some(text),
+        Ok(_) => None,
+        Err(_) => {
+            stderr_tail.abort();
+            None
+        }
+    };
+    Ok(match outcome {
+        CodexTurnObservation::Uncertain { reason, .. } => {
+            CodexTurnObservation::Uncertain { reason, stderr }
+        }
+        observed => observed,
+    })
 }
 
 #[cfg(all(test, unix))]
@@ -672,11 +829,15 @@ log=os.environ['FAKE_LOG'];state=os.environ['FAKE_STATE']
 if mode=='home-namespace':state=os.path.join(os.environ['CODEX_HOME'],'owned-history.json')
 if mode=='stdin-config':
  if '--profile' in sys.argv or any('fixture-secret' in a for a in sys.argv):sys.exit(2)
+if mode=='stderr-fail':
+ sys.stderr.write('fixture diagnostic\n');sys.stderr.flush();sys.exit(5)
 
 def emit(v): print(json.dumps(v),flush=True)
 for line in sys.stdin:
  q=json.loads(line);m=q['method'];p=q.get('params',{})
  with open(log,'a') as f:f.write(m+'\n')
+ if m in ['thread/start','thread/resume','turn/start']:
+  with open(log+'.params','a') as f:f.write(json.dumps({'method':m,'approvalPolicy':p.get('approvalPolicy'),'sandbox':p.get('sandbox')})+'\n')
  if 'id' not in q:continue
  if mode=='unsupported':emit({'id':q['id'],'error':{'code':-32601}});continue
  if mode=='malformed':print('bad-json',flush=True);continue
@@ -696,6 +857,8 @@ for line in sys.stdin:
   emit({'id':q['id'],'result':{'turn':{'id':'turn-1'}}})
   emit({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn-1','itemId':'answer','delta':'OK'}})
   emit({'method':'item/completed','params':{'threadId':'thread-1','turnId':'turn-1','item':{'type':'agentMessage','id':'answer','text':'OK'}}})
+  if mode=='slow-turn':
+   import time;time.sleep(float(os.environ.get('FAKE_DELAY','1')))
   emit({'method':'turn/completed','params':{'threadId':'thread-1','turn':{'id':'turn-1','status':'completed'}}});continue
  elif m=='thread/turns/list':
   t={'id':'turn-1','items':[{'type':'userMessage','clientId':'client-1'},{'type':'agentMessage','id':'answer','text':'OK'}],'status':mode if mode in ['completed','failed','interrupted','inProgress'] else 'completed'}
@@ -1131,6 +1294,179 @@ for line in sys.stdin:
             })
             .collect::<String>();
         assert_eq!(text, "OK");
+    }
+    fn codex_options(options: &mut RunOptions) -> &mut crate::CodexOptions {
+        options
+            .providers
+            .get_or_insert_default()
+            .codex
+            .get_or_insert_default()
+    }
+    fn logged_params(dir: &tempfile::TempDir) -> Vec<Value> {
+        std::fs::read_to_string(dir.path().join("methods.params"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+    #[tokio::test]
+    async fn the_turn_outlives_the_request_deadline_under_its_own_limit() {
+        let (_dir, mut options) = fixture("slow-turn");
+        // Startup, thread/start and turn/start each fit the request bound; the
+        // turn alone runs longer than it.
+        options
+            .env
+            .as_mut()
+            .unwrap()
+            .insert("FAKE_DELAY".into(), "5".into());
+        codex_options(&mut options).app_server_request_timeout_ms = Some(3_000);
+        options.total_timeout_ms = Some(30_000);
+        let result = prepare_codex_turn(
+            options,
+            Box::new(|id| Box::pin(async move { Ok(ack(id)) })),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, CodexTurnObservation::Observed { ref status, .. } if status == "completed"),
+            "{result:?}"
+        );
+    }
+    #[tokio::test]
+    async fn the_turn_deadline_and_idle_bound_are_the_callers() {
+        for (total, idle) in [(Some(300), None), (None, Some(300))] {
+            let (_dir, mut options) = fixture("slow-turn");
+            options
+                .env
+                .as_mut()
+                .unwrap()
+                .insert("FAKE_DELAY".into(), "5".into());
+            options.total_timeout_ms = total;
+            options.idle_timeout_ms = idle;
+            let started = std::time::Instant::now();
+            let result = prepare_codex_turn(
+                options,
+                Box::new(|id| Box::pin(async move { Ok(ack(id)) })),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(result, CodexTurnObservation::Uncertain { ref reason, .. } if reason == "provider_deadline_requires_inspection"),
+                "{result:?}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(4),
+                "{total:?} {idle:?}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn a_slow_admission_is_bounded_by_the_request_deadline() {
+        let (dir, mut options) = fixture("completed");
+        codex_options(&mut options).app_server_request_timeout_ms = Some(3_000);
+        let result = prepare_codex_turn(
+            options,
+            Box::new(|id| {
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    Ok(ack(id))
+                })
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, CodexTurnObservation::Uncertain { ref reason, .. } if reason == "provider_deadline_requires_inspection"),
+            "{result:?}"
+        );
+        let methods = std::fs::read_to_string(dir.path().join("methods")).unwrap();
+        assert!(methods.contains("thread/start"));
+        assert!(!methods.contains("turn/start"));
+    }
+    #[tokio::test]
+    async fn thread_policy_defaults_to_never_and_read_only_and_follows_codex_options() {
+        let cases = [
+            (None, None, false, "never", "read-only"),
+            (
+                Some("full-auto"),
+                None,
+                false,
+                "on-request",
+                "workspace-write",
+            ),
+            (
+                Some("full-auto"),
+                Some("read-only"),
+                false,
+                "on-request",
+                "read-only",
+            ),
+            (
+                None,
+                Some("workspace-write"),
+                false,
+                "never",
+                "workspace-write",
+            ),
+            (None, None, true, "never", "danger-full-access"),
+        ];
+        for (policy, sandbox, skip, approval, expected_sandbox) in cases {
+            for resume in [false, true] {
+                let (dir, mut options) = fixture("completed");
+                let codex = codex_options(&mut options);
+                codex.approval_policy = policy.map(Into::into);
+                codex.sandbox_mode = sandbox.map(Into::into);
+                options.skip_permissions = skip;
+                if resume {
+                    options.resume_session_id = Some("thread-1".into());
+                }
+                prepare_codex_turn(
+                    options,
+                    Box::new(|id| Box::pin(async move { Ok(ack(id)) })),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+                let params = logged_params(&dir);
+                let thread = &params[0];
+                assert_eq!(
+                    thread["method"],
+                    if resume {
+                        "thread/resume"
+                    } else {
+                        "thread/start"
+                    }
+                );
+                assert_eq!(thread["approvalPolicy"], approval, "{policy:?} {sandbox:?}");
+                assert_eq!(
+                    thread["sandbox"], expected_sandbox,
+                    "{policy:?} {sandbox:?}"
+                );
+                let turn = params.iter().find(|p| p["method"] == "turn/start").unwrap();
+                assert_eq!(turn["approvalPolicy"], approval);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn provider_stderr_tail_explains_an_uncertain_outcome() {
+        let (_dir, options) = fixture("stderr-fail");
+        let result = codex_app_server(
+            CodexAppServerRequest::Inspect {
+                options,
+                binding: binding(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let CodexTurnObservation::Uncertain { reason, stderr } = result else {
+            panic!("{result:?}");
+        };
+        assert_eq!(reason, "provider_transport_or_protocol_failure");
+        assert_eq!(stderr.as_deref(), Some("fixture diagnostic\n"));
     }
     #[tokio::test]
     async fn prepare_existing_conversation_keeps_thread_before_admission_without_a_new_thread() {

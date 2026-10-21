@@ -191,24 +191,67 @@ struct CodexMcpServer {
 struct InvocationConfig {
     home: Option<PathBuf>,
     args: Vec<String>,
-    profile: Option<tempfile::NamedTempFile>,
+    /// Complete snapshot: caller base config plus this invocation's overrides.
+    table: Option<toml::Table>,
+    profile: Option<ProfileLink>,
     artifacts: Option<tempfile::TempDir>,
 }
 
+/// `--profile <name>` resolves `$CODEX_HOME/<name>.config.toml`. That path is
+/// only a symlink: the private file it names lives in the run's artifact
+/// directory, so MCP credentials never land in the provider home.
+struct ProfileLink {
+    link: PathBuf,
+}
+
+impl ProfileLink {
+    #[cfg(test)]
+    fn path(&self) -> &Path {
+        &self.link
+    }
+}
+
+impl Drop for ProfileLink {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.link);
+    }
+}
+
+/// Exec: snapshot plus a named profile file the CLI loads with `--profile`.
 async fn write_configs(opts: &RunOptions) -> Result<InvocationConfig> {
-    write_configs_scoped(opts, false).await
+    let mut config = snapshot_config(opts, false).await?;
+    if let (Some(table), Some(home)) = (&config.table, &config.home) {
+        let dir = match config.artifacts.take() {
+            Some(dir) => dir,
+            None => crate::artifacts::temp_dir(opts, "cli-agents-codex-")?,
+        };
+        let content = toml::to_string(table)
+            .map_err(|_| Error::Other("Cannot serialize Codex invocation configuration".into()))?;
+        let target = dir.path().join("profile.config.toml");
+        write_private(&target, content.as_bytes())?;
+        let name = dir
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| Error::Other("Invalid Codex profile filename".into()))?
+            .to_owned();
+        let link = home.join(format!("{name}.config.toml"));
+        symlink_file(&target, &link)?;
+        config.args = vec!["--profile".into(), name];
+        config.profile = Some(ProfileLink { link });
+        config.artifacts = Some(dir);
+    }
+    Ok(config)
 }
 
 // Every app-server operation, including config-free read-only inspection, must
 // open the same provider state database as configured prepare/run operations.
+// app-server takes the snapshot over JSON-RPC, so no profile file is written.
 async fn write_configs_for_app_server(opts: &RunOptions) -> Result<InvocationConfig> {
-    write_configs_scoped(opts, true).await
+    snapshot_config(opts, true).await
 }
 
-async fn write_configs_scoped(
-    opts: &RunOptions,
-    always_snapshot: bool,
-) -> Result<InvocationConfig> {
+async fn snapshot_config(opts: &RunOptions, always_snapshot: bool) -> Result<InvocationConfig> {
     let system_prompt = resolve_system_prompt(opts).await?;
     if !always_snapshot && opts.mcp_servers.is_none() && system_prompt.is_none() {
         return Ok(InvocationConfig::default());
@@ -227,7 +270,7 @@ async fn write_configs_scoped(
         toml::Table::new()
     };
     let mut config = InvocationConfig {
-        home: Some(runtime_home.clone()),
+        home: Some(runtime_home),
         ..Default::default()
     };
     if let Some(prompt) = system_prompt {
@@ -267,23 +310,25 @@ async fn write_configs_scoped(
         }
         table.insert("mcp_servers".into(), toml::Value::Table(mcp));
     }
-    let mut profile = tempfile::Builder::new()
-        .prefix("cli-agents-")
-        .suffix(".config.toml")
-        .tempfile_in(&runtime_home)
-        .map_err(Error::Io)?;
-    let content = toml::to_string(&table)
-        .map_err(|_| Error::Other("Cannot serialize Codex invocation configuration".into()))?;
-    profile.write_all(content.as_bytes()).map_err(Error::Io)?;
-    let filename = profile
-        .path()
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| Error::Other("Invalid Codex profile filename".into()))?;
-    let name = filename.strip_suffix(".config.toml").unwrap();
-    config.args = vec!["--profile".into(), name.into()];
-    config.profile = Some(profile);
+    config.table = Some(table);
     Ok(config)
+}
+
+fn write_private(path: &Path, content: &[u8]) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path).map_err(Error::Io)?;
+    file.write_all(content).map_err(Error::Io)
+}
+
+fn symlink_file(target: &Path, link: &Path) -> Result<()> {
+    #[cfg(unix)]
+    let result = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let result = std::os::windows::fs::symlink_file(target, link);
+    result.map_err(Error::Io)
 }
 
 /// Stable paths are required: Codex records absolute rollout paths in SQLite.
@@ -607,6 +652,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generated_config_uses_the_owned_artifact_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let artifact_root = artifacts.path().canonicalize().unwrap();
+        let opts = RunOptions {
+            artifact_dir: Some(artifact_root.to_string_lossy().into_owned()),
+            system_prompt: Some("owned prompt".into()),
+            mcp_servers: Some(HashMap::from([(
+                "http".into(),
+                crate::types::McpServer {
+                    url: Some("https://mcp.test".into()),
+                    transport_type: Some(crate::types::McpTransport::Http),
+                    headers: Some(HashMap::from([(
+                        "Authorization".into(),
+                        "Bearer owned-secret".into(),
+                    )])),
+                    ..Default::default()
+                },
+            )])),
+            ..scoped_options(&home)
+        };
+        let config = write_configs(&opts).await.unwrap();
+        let runtime_home = config.home.clone().unwrap();
+        let link = config.profile.as_ref().unwrap().path().to_path_buf();
+        assert_eq!(link.parent(), Some(runtime_home.as_path()));
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let target = std::fs::read_link(&link).unwrap();
+        assert!(target.starts_with(&artifact_root), "{target:?}");
+        assert!(
+            std::fs::read_to_string(&target)
+                .unwrap()
+                .contains("Bearer owned-secret")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // The profile name Codex resolves is the link's stem.
+        let name = link
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .strip_suffix(".config.toml")
+            .unwrap()
+            .to_owned();
+        assert_eq!(config.args, ["--profile".to_string(), name]);
+        // No regular file anywhere under the provider home holds the credential.
+        let mut pending = vec![home.path().to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                } else if kind.is_file() {
+                    let bytes = std::fs::read(entry.path()).unwrap();
+                    assert!(!String::from_utf8_lossy(&bytes).contains("owned-secret"));
+                }
+            }
+        }
+        drop(config);
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
     async fn concurrent_profiles_keep_one_stable_home_and_independent_configuration() {
         let home = tempfile::tempdir().unwrap();
         let first = RunOptions {
@@ -691,12 +810,10 @@ mod tests {
             .unwrap()
             .join(".cli-agents-runtime");
         assert_eq!(app_server.home.as_ref(), Some(&expected_home));
-        let table: toml::Table = toml::from_str(
-            &std::fs::read_to_string(app_server.profile.as_ref().unwrap().path()).unwrap(),
-        )
-        .unwrap();
+        assert!(app_server.profile.is_none());
+        assert!(app_server.args.is_empty());
         let expected: toml::Table = toml::from_str(base).unwrap();
-        assert_eq!(table, expected);
+        assert_eq!(app_server.table.as_ref(), Some(&expected));
         assert_eq!(
             std::fs::read_to_string(expected_home.join("auth.json")).unwrap(),
             "fixture auth bytes"

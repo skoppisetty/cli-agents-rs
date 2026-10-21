@@ -61,4 +61,8 @@ pub use types::{
 };
 
 /// Official opt-in provider correlation/inspection primitives; no automatic redispatch.
-pub use adapters::{codex_app_server, codex_app_server_with_progress, prepare_codex_turn, prepare_codex_turn_with_progress, CodexProgress, CodexAdmission, CodexPreparedRun, CodexAppServerRequest, CodexTurnBinding, CodexTurnObservation};
+pub use adapters::{
+    CodexAdmission, CodexAppServerRequest, CodexPreparedRun, CodexProgress, CodexTurnBinding,
+    CodexTurnObservation, codex_app_server, codex_app_server_with_progress, prepare_codex_turn,
+    prepare_codex_turn_with_progress,
+};

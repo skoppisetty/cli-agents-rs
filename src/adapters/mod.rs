@@ -5,7 +5,11 @@ mod codex;
 pub use antigravity::AntigravityAdapter;
 pub use claude::ClaudeAdapter;
 pub use codex::CodexAdapter;
-pub use codex::app_server::{codex_app_server, codex_app_server_with_progress, prepare_codex_turn, prepare_codex_turn_with_progress, CodexProgress, CodexAdmission, CodexPreparedRun, CodexAppServerRequest, CodexTurnBinding, CodexTurnObservation};
+pub use codex::app_server::{
+    CodexAdmission, CodexAppServerRequest, CodexPreparedRun, CodexProgress, CodexTurnBinding,
+    CodexTurnObservation, codex_app_server, codex_app_server_with_progress, prepare_codex_turn,
+    prepare_codex_turn_with_progress,
+};
 
 use crate::error::{Error, Result};
 use crate::events::StreamEvent;
@@ -219,24 +223,7 @@ pub(crate) async fn spawn_and_stream(
     // at the end — a chatty CLI logging megabytes must not be held in full
     // for that. Chunked reads, not lines: a single unterminated line cannot
     // grow the buffer past the bound either.
-    let mut stderr_handle = tokio::spawn(async move {
-        use tokio::io::AsyncReadExt;
-        let mut stderr = stderr;
-        let mut buf: Vec<u8> = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            match stderr.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    buf.extend_from_slice(&chunk[..n]);
-                    if buf.len() > STDERR_TAIL_BYTES * 2 {
-                        buf.drain(..buf.len() - STDERR_TAIL_BYTES);
-                    }
-                }
-            }
-        }
-        String::from_utf8_lossy(&buf).into_owned()
-    });
+    let mut stderr_handle = collect_stderr_tail(stderr);
 
     // `max_bytes` bounds what a single LINE may retain — not cumulative
     // throughput. Every line is handed to `on_line` and released, so the
@@ -319,6 +306,33 @@ pub(crate) async fn spawn_and_stream(
 
 /// How much stderr is retained (as a tail — see the reader above).
 const STDERR_TAIL_BYTES: usize = 64 * 1024;
+
+/// Read `stderr` to EOF, keeping only the last [`STDERR_TAIL_BYTES`].
+pub(crate) fn collect_stderr_tail(
+    stderr: tokio::process::ChildStderr,
+) -> tokio::task::JoinHandle<String> {
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut stderr = stderr;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match stderr.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.len() > STDERR_TAIL_BYTES * 2 {
+                        buf.drain(..buf.len() - STDERR_TAIL_BYTES);
+                    }
+                }
+            }
+        }
+        if buf.len() > STDERR_TAIL_BYTES {
+            buf.drain(..buf.len() - STDERR_TAIL_BYTES);
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    })
+}
 
 /// Outcome of one capped line read.
 enum CappedLine {
@@ -497,27 +511,44 @@ mod tests {
             "exec 1>&-; (sleep 1; rm -f survivor) & sleep 10",
             "exec 1>&-; (sleep 1; rm -f survivor) & exit 0",
         ] {
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("survivor");
-        std::fs::write(&marker, "alive").unwrap();
-        // Both descendants inherit closed stdout. The adapter reaches child.wait
-        // before cancellation; the delayed effect proves the entire group died.
-        let args = vec!["-c".to_string(), script.to_string()];
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let token = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            token.cancel();
-        });
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), spawn_and_stream(
-            SpawnParams { cli_label: "test", binary: "sh", args: &args,
-                extra_env: &HashMap::new(), clear_env: false, strip_env: &[],
-                cwd: dir.path().to_str().unwrap(), max_bytes: 1024, cancel: &cancel },
-            |_: &str| {},
-        )).await.expect("cancel must interrupt process wait after stdout EOF").expect("spawn");
-        assert!(matches!(outcome, SpawnOutcome::Cancelled));
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-        assert!(marker.exists(), "a provider descendant outlived cancellation");
+            let dir = tempfile::tempdir().unwrap();
+            let marker = dir.path().join("survivor");
+            std::fs::write(&marker, "alive").unwrap();
+            // Both descendants inherit closed stdout. The adapter reaches child.wait
+            // before cancellation; the delayed effect proves the entire group died.
+            let args = vec!["-c".to_string(), script.to_string()];
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let token = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                token.cancel();
+            });
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                spawn_and_stream(
+                    SpawnParams {
+                        cli_label: "test",
+                        binary: "sh",
+                        args: &args,
+                        extra_env: &HashMap::new(),
+                        clear_env: false,
+                        strip_env: &[],
+                        cwd: dir.path().to_str().unwrap(),
+                        max_bytes: 1024,
+                        cancel: &cancel,
+                    },
+                    |_: &str| {},
+                ),
+            )
+            .await
+            .expect("cancel must interrupt process wait after stdout EOF")
+            .expect("spawn");
+            assert!(matches!(outcome, SpawnOutcome::Cancelled));
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            assert!(
+                marker.exists(),
+                "a provider descendant outlived cancellation"
+            );
         }
     }
 

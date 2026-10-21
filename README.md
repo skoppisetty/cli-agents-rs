@@ -324,8 +324,13 @@ The adapter keeps `.cli-agents-runtime` inside the explicit child `CODEX_HOME`
 (or child `HOME/.codex`). Its stable links retain owner auth/session locations,
 including absolute rollout paths used by Codex SQLite state. It never rewrites
 the owner's `config.toml` or authentication files. Each invocation gets an
-independent temporary profile (0600) containing its configuration, including
-stdio environment variables and HTTP headers. Credentials are not command-line
-arguments. Only profiles and instruction artifacts are removed after a turn;
-the runtime home must remain while sessions may be resumed. Sandbox callers
-must grant access to their own persistent Codex home and provide it explicitly.
+independent profile (0600) containing its configuration, including stdio
+environment variables and HTTP headers. The profile file itself is written under
+`artifact_dir` (or the OS temp directory when none is set); the runtime home
+holds only the `<name>.config.toml` symlink Codex resolves for `--profile`, so
+credentials never land in the provider home. Credentials are not command-line
+arguments. Only the profile, its link and instruction artifacts are removed
+after a turn; the runtime home must remain while sessions may be resumed.
+Sandbox callers must grant read access to `artifact_dir` and to their own
+persistent Codex home, and provide that home explicitly. The opt-in app-server
+transport sends the same snapshot over JSON-RPC and writes no profile file.

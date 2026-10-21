@@ -39,7 +39,7 @@ prove which product tools committed.
 The CLI exposes `--codex-app-server-stdin`. Send one JSON line:
 
 ```json
-{"operation":"prepare","options":{"cli":"codex","task":"","executablePath":"/absolute/path/to/codex","cwd":"/owned/workspace","totalTimeoutMs":60000}}
+{"operation":"prepare","options":{"cli":"codex","task":"","executablePath":"/absolute/path/to/codex","cwd":"/owned/workspace","totalTimeoutMs":1800000}}
 ```
 
 It emits `{"state":"prepared","threadId":"..."}`. After committing the
@@ -57,11 +57,30 @@ For read-only inspection, use a new CLI process and one JSON line:
 
 Do not accept caller-supplied paths, homes, credentials or bindings without
 validating their owner/scope. Existing invocation-specific MCP/system-prompt
-configuration and explicit child environment handling are reused. New prepare
-threads use read-only sandbox and approval policy `never`; unsupported server
-approval requests are refused. The operation has bounded messages/history,
-notification retention and wall time, uses process groups/Windows job objects,
-and leaves timeout/cancellation uncertain pending exact inspection.
+configuration and explicit child environment handling are reused; the snapshot
+travels in the thread/start and thread/resume `config` field, never as a file.
+
+Approval and sandbox follow `CodexOptions` with the same vocabulary as exec:
+`approvalPolicy: "full-auto"` maps to approval `on-request` (and sandbox
+`workspace-write` unless `sandboxMode` is set), `sandboxMode` passes through,
+and `skipPermissions` without a policy selects `danger-full-access`. With none
+of these, threads use approval `never` and sandbox `read-only`. The values are
+sent on thread/start, thread/resume and turn/start. This adapter refuses every
+server approval request, so `on-request` turns cannot obtain approvals.
+
+Deadlines are split. Each control step (initialize, thread start/resume, the
+caller's admission acknowledgement, and turn inspection) is bounded by
+`providers.codex.appServerRequestTimeoutMs` (default 60 000 ms, capped at
+300 000 ms). The model turn, from turn/start acceptance to turn/completed, is
+bounded only by the caller's `totalTimeoutMs` (absolute, unlimited when unset)
+and `idleTimeoutMs` (time between provider messages, default 300 000 ms; `0`
+disables it). Any elapsed deadline yields
+`uncertain: provider_deadline_requires_inspection`.
+
+The operation has bounded messages/history and notification retention, uses
+process groups/Windows job objects, and leaves timeout/cancellation uncertain
+pending exact inspection. An `uncertain` observation carries a bounded (64 KiB)
+`stderr` tail when the provider wrote one.
 
 The optional `_with_progress` library variants reuse the maintained Codex
 exec parser for scoped text/tool events. CLI `--json` emits those existing

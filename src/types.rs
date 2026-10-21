@@ -128,6 +128,11 @@ pub struct CodexOptions {
     /// this crate doesn't model. Appended last, so they can override earlier
     /// defaults.
     pub extra_args: Option<Vec<String>>,
+    /// App-server transport only: deadline for each control step (initialize,
+    /// thread start/resume, the caller's admission acknowledgement, turn
+    /// inspection). Default 60 000 ms, capped at 300 000 ms. The turn itself is
+    /// bounded by `RunOptions::total_timeout_ms` and `idle_timeout_ms` instead.
+    pub app_server_request_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -189,7 +194,7 @@ pub struct RunOptions {
     /// Total timeout in milliseconds. No default.
     pub total_timeout_ms: Option<u64>,
 
-    /// Max consecutive tool failures before aborting. Disabled when omitted or zero.
+    /// Max consecutive tool failures before aborting. Default: 3. `0` disables the limit.
     pub max_consecutive_tool_failures: Option<u32>,
 
     /// Extra environment variables for the CLI process.

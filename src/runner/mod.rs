@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use emit::EmitWrapper;
 
 const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000; // 5 minutes
-const DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES: u32 = 0;
+const DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES: u32 = 3;
 
 /// Handle returned by [`run()`] — allows awaiting the result or aborting.
 #[must_use = "the run will be abandoned if the handle is dropped"]
@@ -105,5 +105,51 @@ async fn run_internal(
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Five failing commands, then a final answer.
+    async fn run_failing_provider(limit: Option<u32>) -> RunResult {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-codex");
+        let mut body = String::from("#!/bin/sh\n");
+        for i in 0..5 {
+            body.push_str(&format!(
+                "printf '%s\\n' '{{\"type\":\"item.started\",\"item\":{{\"type\":\"command_execution\",\"id\":\"c{i}\",\"command\":\"bad\"}}}}'\n\
+                 printf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"command_execution\",\"id\":\"c{i}\",\"command\":\"bad\",\"exit_code\":1}}}}'\n\
+                 sleep 0.05\n"
+            ));
+        }
+        body.push_str("printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"id\":\"m\",\"text\":\"done\"}}'\n");
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let opts = RunOptions {
+            cli: Some(crate::CliName::Codex),
+            task: "loop".into(),
+            executable_path: Some(script.to_string_lossy().into_owned()),
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+            max_consecutive_tool_failures: limit,
+            ..Default::default()
+        };
+        run(opts, None).result.await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_runaway_tool_loop_guard_is_on_by_default() {
+        let result = run_failing_provider(None).await;
+        assert!(!result.success);
+        assert_eq!(result.text.as_deref(), Some("Cancelled."));
+    }
+
+    #[tokio::test]
+    async fn zero_disables_the_runaway_tool_loop_guard() {
+        let result = run_failing_provider(Some(0)).await;
+        assert!(result.success, "{result:?}");
+        assert_eq!(result.text.as_deref(), Some("done"));
     }
 }

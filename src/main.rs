@@ -108,49 +108,79 @@ async fn main() {
         // One JSON line per request; Prepare emits a thread ID then awaits a second,
         // explicitly admitted {binding,task} line on the SAME provider connection.
         let mut line = String::new();
-        if std::io::stdin().lock().take(1_048_577).read_line(&mut line).is_err() || line.len() > 1_048_576 {
-            eprintln!("Invalid Codex app-server request"); std::process::exit(2);
+        if std::io::stdin()
+            .lock()
+            .take(1_048_577)
+            .read_line(&mut line)
+            .is_err()
+            || line.len() > 1_048_576
+        {
+            eprintln!("Invalid Codex app-server request");
+            std::process::exit(2);
         }
         let request: cli_agents::CodexAppServerRequest = match serde_json::from_str(&line) {
             Ok(request) => request,
-            Err(_) => { eprintln!("Invalid Codex app-server request"); std::process::exit(2); }
+            Err(_) => {
+                eprintln!("Invalid Codex app-server request");
+                std::process::exit(2);
+            }
         };
         let cancel = tokio_util::sync::CancellationToken::new();
         // Embedders terminate this CLI with SIGTERM. Reap the separate provider
         // process group and retain uncertainty instead of orphaning its turn.
-        let signal_cancel = cancel.clone();
-        tokio::spawn(async move {
-            #[cfg(unix)]
-            if let Ok(mut terminate) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                tokio::select! { _ = terminate.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
-                signal_cancel.cancel();
-                return;
-            }
-            let _ = tokio::signal::ctrl_c().await;
-            signal_cancel.cancel();
-        });
+        install_shutdown(cancel.clone(), false);
         let json_progress = args.json;
         let progress: cli_agents::CodexProgress = Arc::new(move |event| {
-            if json_progress { println!("{}", serde_json::to_string(&event).unwrap()); }
+            if json_progress {
+                println!("{}", serde_json::to_string(&event).unwrap());
+            }
         });
         let result = match request {
             cli_agents::CodexAppServerRequest::Prepare { options } => {
-                cli_agents::prepare_codex_turn_with_progress(options, Box::new(|thread_id| Box::pin(async move {
-                    println!("{}", serde_json::json!({"state":"prepared","threadId":thread_id}));
-                    std::io::stdout().flush().map_err(cli_agents::Error::Io)?;
-                    tokio::task::spawn_blocking(|| {
-                        let mut ack = String::new();
-                        std::io::stdin().lock().take(1_048_577).read_line(&mut ack).map_err(cli_agents::Error::Io)?;
-                        if ack.len() > 1_048_576 { return Err(cli_agents::Error::Other("Admission bound exceeded".into())); }
-                        serde_json::from_str(&ack).map_err(|_| cli_agents::Error::Other("Invalid admission acknowledgement".into()))
-                    }).await.map_err(|_| cli_agents::Error::Other("Admission interrupted".into()))?
-                })), cancel, progress.clone()).await
-            },
+                cli_agents::prepare_codex_turn_with_progress(
+                    options,
+                    Box::new(|thread_id| {
+                        Box::pin(async move {
+                            println!(
+                                "{}",
+                                serde_json::json!({"state":"prepared","threadId":thread_id})
+                            );
+                            std::io::stdout().flush().map_err(cli_agents::Error::Io)?;
+                            tokio::task::spawn_blocking(|| {
+                                let mut ack = String::new();
+                                std::io::stdin()
+                                    .lock()
+                                    .take(1_048_577)
+                                    .read_line(&mut ack)
+                                    .map_err(cli_agents::Error::Io)?;
+                                if ack.len() > 1_048_576 {
+                                    return Err(cli_agents::Error::Other(
+                                        "Admission bound exceeded".into(),
+                                    ));
+                                }
+                                serde_json::from_str(&ack).map_err(|_| {
+                                    cli_agents::Error::Other(
+                                        "Invalid admission acknowledgement".into(),
+                                    )
+                                })
+                            })
+                            .await
+                            .map_err(|_| cli_agents::Error::Other("Admission interrupted".into()))?
+                        })
+                    }),
+                    cancel,
+                    progress.clone(),
+                )
+                .await
+            }
             other => cli_agents::codex_app_server_with_progress(other, cancel, progress).await,
         };
         match result {
             Ok(result) => println!("{}", serde_json::to_string(&result).unwrap()),
-            Err(_) => { eprintln!("Codex app-server operation rejected"); std::process::exit(2); }
+            Err(_) => {
+                eprintln!("Codex app-server operation rejected");
+                std::process::exit(2);
+            }
         }
         // A blocked stdin reader must not keep this bounded CLI alive after timeout.
         std::process::exit(0);
@@ -257,31 +287,9 @@ async fn main() {
         })
     };
 
-    // Providers own separate process groups. Even with piped stdin the wrapper
-    // must translate parent termination into library cancellation and await
-    // cleanup; killing this wrapper alone would orphan the provider group.
-    #[cfg(unix)]
-    let shutdown = {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut interrupt = signal(SignalKind::interrupt()).expect("install SIGINT handler");
-        let mut terminate = signal(SignalKind::terminate()).expect("install SIGTERM handler");
-        async move {
-            tokio::select! {
-                _ = interrupt.recv() => {},
-                _ = terminate.recv() => {},
-            }
-        }
-    };
-    #[cfg(not(unix))]
-    let shutdown = async { let _ = tokio::signal::ctrl_c().await; };
     let handle = run(opts, Some(on_event));
-    let cancel = handle.cancel.clone();
     let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
-    tokio::spawn(async move {
-        shutdown.await;
-        if interactive { eprintln!("\nCancelling..."); }
-        cancel.cancel();
-    });
+    install_shutdown(handle.cancel.clone(), interactive);
 
     match handle.result.await {
         Ok(Ok(result)) => {
@@ -299,6 +307,48 @@ async fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Providers own separate process groups. Even with piped stdin the wrapper
+/// must translate parent termination into library cancellation and await
+/// cleanup; killing this wrapper alone would orphan the provider group. The
+/// FIRST SIGINT/SIGTERM cancels; a SECOND exits immediately with 128+signal,
+/// so a cleanup that cannot finish never makes the wrapper unkillable.
+/// Handlers are installed before returning, so no signal is missed.
+fn install_shutdown(cancel: tokio_util::sync::CancellationToken, announce: bool) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut interrupt = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+        let mut terminate = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::spawn(async move {
+            let mut cancelling = false;
+            loop {
+                let signo = tokio::select! {
+                    _ = interrupt.recv() => 2,
+                    _ = terminate.recv() => 15,
+                };
+                if cancelling {
+                    std::process::exit(128 + signo);
+                }
+                if announce {
+                    eprintln!("\nCancelling... (signal again to force exit)");
+                }
+                cancel.cancel();
+                cancelling = true;
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        if announce {
+            eprintln!("\nCancelling... (Ctrl-C again to force exit)");
+        }
+        cancel.cancel();
+        let _ = tokio::signal::ctrl_c().await;
+        std::process::exit(130);
+    });
 }
 
 #[cfg(test)]
