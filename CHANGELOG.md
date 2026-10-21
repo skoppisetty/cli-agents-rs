@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Security
+- Claude: per-run `mcp_servers` are written to a 0600 file in the run's artifact directory and passed as `--mcp-config <path>`. They were inline JSON in argv, where server env and headers (often credentials) are readable by other local users through `ps`. The file is removed when the run ends.
+
 ## 0.3.1 - 2026-09-03
 
 ### Added
