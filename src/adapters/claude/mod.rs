@@ -28,7 +28,7 @@ impl CliAdapter for ClaudeAdapter {
         };
 
         // Keep the spilled files alive until the child has been spawned and
-        // finished — they are dropped (and removed) after the await below.
+        // finished; they are dropped (and removed) after the await below.
         let (opts_for_args, _spill) = spill_append_system_prompt(opts)?;
         let mcp_config = spill_mcp_config(opts)?;
         let args = build_args(
