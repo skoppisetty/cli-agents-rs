@@ -27,11 +27,14 @@ impl CliAdapter for ClaudeAdapter {
             None => discover_binary(CliName::Claude).await.ok_or(Error::NoCli)?,
         };
 
-        // Keep the spilled prompt file alive until the child has been spawned
-        // and finished — `_spill` is dropped (and the file removed) after the
-        // await below.
+        // Keep the spilled files alive until the child has been spawned and
+        // finished; they are dropped (and removed) after the await below.
         let (opts_for_args, _spill) = spill_append_system_prompt(opts)?;
-        let args = build_args(&opts_for_args);
+        let mcp_config = spill_mcp_config(opts)?;
+        let args = build_args(
+            &opts_for_args,
+            mcp_config.as_ref().map(tempfile::NamedTempFile::path),
+        );
         let extra_env = opts.env.clone().unwrap_or_default();
         let max_bytes = opts.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
 
@@ -62,6 +65,7 @@ impl CliAdapter for ClaudeAdapter {
             crate::adapters::SpawnOutcome::Cancelled => Ok(RunResult {
                 success: false,
                 text: Some("Cancelled.".into()),
+                session_id: state.session_id,
                 ..Default::default()
             }),
             crate::adapters::SpawnOutcome::Done {
@@ -123,7 +127,22 @@ fn spill_append_system_prompt(
     Ok((spilled, Some(file)))
 }
 
-fn build_args(opts: &RunOptions) -> Vec<String> {
+/// Write the per-run MCP servers to a file readable by this user alone, so
+/// server env and headers (often credentials) never appear in the child's
+/// argv, which other local users can read.
+fn spill_mcp_config(opts: &RunOptions) -> Result<Option<tempfile::NamedTempFile>> {
+    let Some(servers) = opts.mcp_servers.as_ref().filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let json = serde_json::to_vec(&build_mcp_config(servers))
+        .map_err(|e| Error::Other(format!("Cannot serialize Claude MCP configuration: {e}")))?;
+    // tempfile creates the file 0600 on unix.
+    let mut file = crate::artifacts::prompt_file(opts, "cli-agents-mcp-config-", ".json")?;
+    std::io::Write::write_all(&mut file, &json).map_err(Error::Io)?;
+    Ok(Some(file))
+}
+
+fn build_args(opts: &RunOptions, mcp_config: Option<&std::path::Path>) -> Vec<String> {
     let mut args = vec![
         "-p".into(),
         opts.task.clone(),
@@ -214,12 +233,9 @@ fn build_args(opts: &RunOptions) -> Vec<String> {
         args.push(system_prompt.clone());
     }
 
-    // MCP servers: write inline JSON via --mcp-config (Claude CLI accepts this)
-    if let Some(servers) = opts.mcp_servers.as_ref().filter(|s| !s.is_empty()) {
-        if let Ok(json) = serde_json::to_string(&build_mcp_config(servers)) {
-            args.push("--mcp-config".into());
-            args.push(json);
-        }
+    if let Some(path) = mcp_config {
+        args.push("--mcp-config".into());
+        args.push(path.to_string_lossy().into_owned());
     }
 
     // Permission bypass for non-interactive use (opt-in)
@@ -302,7 +318,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let args = build_args(&opts);
+        let args = build_args(&opts, None);
         assert!(args.contains(&"--allowedTools".to_string()));
         assert!(args.contains(&"Bash,Read".to_string()));
         assert!(args.contains(&"--disallowedTools".to_string()));
@@ -336,7 +352,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let args = build_args(&opts);
+        let args = build_args(&opts, None);
         assert!(args.contains(&"--append-system-prompt-file".to_string()));
         assert!(args.contains(&"/path/to/append.md".to_string()));
         assert!(!args.contains(&"--append-system-prompt".to_string()));
@@ -363,7 +379,7 @@ mod tests {
         let (spilled, file) = spill_append_system_prompt(&opts).unwrap();
         let file = file.expect("inline prompt must be spilled");
         assert_eq!(std::fs::read_to_string(file.path()).unwrap(), big);
-        let args = build_args(&spilled);
+        let args = build_args(&spilled, None);
         assert!(args.contains(&"--append-system-prompt-file".to_string()));
         assert!(args.contains(&file.path().to_string_lossy().into_owned()));
         assert!(!args.contains(&"--append-system-prompt".to_string()));
@@ -402,7 +418,7 @@ mod tests {
             ..Default::default()
         };
         let (spilled, _file) = spill_append_system_prompt(&opts).unwrap();
-        let cmdline: usize = build_args(&spilled).iter().map(|a| a.len() + 3).sum();
+        let cmdline: usize = build_args(&spilled, None).iter().map(|a| a.len() + 3).sum();
         assert!(
             cmdline < WINDOWS_CMDLINE_MAX,
             "command line is {cmdline} chars; Windows refuses anything over {WINDOWS_CMDLINE_MAX}"
@@ -465,7 +481,7 @@ mod tests {
             system_prompt_file: Some("/path/to/prompt.md".into()),
             ..Default::default()
         };
-        let args = build_args(&opts);
+        let args = build_args(&opts, None);
         assert!(args.contains(&"--system-prompt-file".to_string()));
         assert!(args.contains(&"/path/to/prompt.md".to_string()));
         assert!(!args.contains(&"--system-prompt".to_string()));
@@ -477,7 +493,7 @@ mod tests {
             task: "hello".into(),
             ..Default::default()
         };
-        let args = build_args(&opts);
+        let args = build_args(&opts, None);
         assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(!args.contains(&"bypassPermissions".to_string()));
     }
@@ -489,7 +505,7 @@ mod tests {
             skip_permissions: true,
             ..Default::default()
         };
-        let args = build_args(&opts);
+        let args = build_args(&opts, None);
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(args.contains(&"bypassPermissions".to_string()));
     }
@@ -500,7 +516,7 @@ mod tests {
             task: "hello".into(),
             ..Default::default()
         };
-        let args = build_args(&opts);
+        let args = build_args(&opts, None);
         assert!(!args.contains(&"--setting-sources".to_string()));
     }
 
@@ -517,7 +533,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let args = build_args(&opts);
+        let args = build_args(&opts, None);
         let idx = args
             .iter()
             .position(|a| a == "--setting-sources")
@@ -539,7 +555,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let args = build_args(&opts);
+        let args = build_args(&opts, None);
         let idx = args
             .iter()
             .position(|a| a == "--setting-sources")
@@ -553,7 +569,7 @@ mod tests {
             task: "hello".into(),
             ..Default::default()
         };
-        let args = build_args(&opts);
+        let args = build_args(&opts, None);
         // Nothing about extra_args should appear when the option is unset.
         assert!(!args.iter().any(|a| a == "--json-schema"));
     }
@@ -571,7 +587,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let args = build_args(&opts);
+        let args = build_args(&opts, None);
         let idx = args
             .iter()
             .position(|a| a == "--json-schema")
@@ -597,7 +613,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let args = build_args(&opts);
+        let args = build_args(&opts, None);
         // The crate emits `--output-format stream-json` early; the user
         // override must appear strictly after the permission-bypass block
         // (the last thing the crate emits).
@@ -614,5 +630,65 @@ mod tests {
             "user extra_args must be appended last so they win over crate defaults"
         );
         assert_eq!(args[user_idx + 1], "text");
+    }
+
+    fn secret_server() -> HashMap<String, crate::types::McpServer> {
+        HashMap::from([(
+            "cueframe".to_string(),
+            crate::types::McpServer {
+                command: Some("/bin/cueframe-mcp".into()),
+                env: Some(HashMap::from([(
+                    "CUEFRAME_SESSION_TOKEN".to_string(),
+                    "bearer-secret".to_string(),
+                )])),
+                ..Default::default()
+            },
+        )])
+    }
+
+    #[test]
+    fn mcp_servers_travel_as_a_private_file_never_in_argv() {
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let opts = RunOptions {
+            task: "hello".into(),
+            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
+            mcp_servers: Some(secret_server()),
+            ..Default::default()
+        };
+        let file = spill_mcp_config(&opts)
+            .unwrap()
+            .expect("servers are spilled");
+        let args = build_args(&opts, Some(file.path()));
+
+        assert!(args.iter().all(|arg| !arg.contains("bearer-secret")));
+        let idx = args.iter().position(|a| a == "--mcp-config").unwrap();
+        assert_eq!(args[idx + 1], file.path().to_string_lossy());
+        assert!(file.path().starts_with(artifact_dir.path()));
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap();
+        assert_eq!(
+            written["mcpServers"]["cueframe"]["env"]["CUEFRAME_SESSION_TOKEN"],
+            "bearer-secret"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(file.path()).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let path = file.path().to_path_buf();
+        drop(file);
+        assert!(!path.exists(), "the config is removed with its run");
+    }
+
+    #[test]
+    fn no_servers_means_no_mcp_config() {
+        let opts = RunOptions {
+            task: "hello".into(),
+            mcp_servers: Some(HashMap::new()),
+            ..Default::default()
+        };
+        assert!(spill_mcp_config(&opts).unwrap().is_none());
+        assert!(!build_args(&opts, None).contains(&"--mcp-config".to_string()));
     }
 }

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0 - 2026-10-21
+
+### Added
+- Opt-in Codex app-server transport: `prepare_codex_turn`, `codex_app_server` and their `_with_progress` variants, with `CodexAppServerRequest` (`prepare` / `run` / `inspect`), `CodexTurnBinding`, `CodexPreparedRun`, `CodexAdmission`, `CodexProgress` and `CodexTurnObservation`. Prepare starts or resumes a thread and dispatches the single `turn/start` only after the caller's admission callback durably acknowledges the exact thread and client message ID. Inspect reads persisted history and reports an exact native status or `uncertain`; nothing is ever redispatched. Configuration (MCP servers, instructions) travels in the JSON-RPC `config` field, never in argv or a file. See `docs/codex-app-server.md`.
+- `CodexOptions.app_server_request_timeout_ms` bounds each app-server control step (initialize, thread start/resume, admission, inspection): default 60 s, capped at 300 s.
+- `CodexTurnObservation::Uncertain` carries a bounded 64 KiB `stderr` tail from the app-server provider. stderr was previously discarded.
+- CLI `--config-stdin` reads one complete `RunOptions` JSON object from stdin and runs it unchanged, so prompts and credentials stay out of argv. It cannot be combined with task or runtime flags, and invalid input exits 2 without echoing submitted values.
+- CLI `--codex-app-server-stdin` runs one app-server request read from stdin. Prepare prints `{"state":"prepared","threadId":...}` and waits for the `{binding, task}` acknowledgement line on the same stdin.
+
+### Changed
+- The app-server model turn has its own deadline: the caller's `total_timeout_ms` (absolute, unlimited when unset) and `idle_timeout_ms` (default 300 s, `0` disables). Before this, prepare, admission and the turn shared a single 60 s deadline capped at 300 s, which killed any longer turn.
+- App-server `thread/start`, `thread/resume` and `turn/start` follow `CodexOptions` with the exec vocabulary (`full-auto` gives `on-request` plus `workspace-write`, `sandbox_mode` passes through, and `skip_permissions` with no policy gives `danger-full-access`). Without options they still use approval `never` and sandbox `read-only`.
+- Codex exec uses a named profile file (`--profile`, Codex CLI 0.162.1 or later) layered on a stable `<CODEX_HOME>/.cli-agents-runtime` home, so absolute rollout paths in Codex's SQLite state survive across runs and sessions resume. The profile file is written 0600 under `artifact_dir` (or the OS temp directory); the runtime home holds only the `<name>.config.toml` symlink Codex resolves. It is removed when the run ends.
+- Codex places `-C` and sandbox and approval flags before `exec resume`, and maps `full-auto` to `--ask-for-approval on-request` instead of the removed `--full-auto`.
+- Cancellation owns the provider process group until it is reaped, including after the provider closes stdout and while stderr drains.
+- A cancelled Claude or Codex run reports the provider session ID it observed before cancellation, so the conversation can be resumed. It was `None` before.
+- The CLI translates SIGINT/SIGTERM into library cancellation even with piped stdin, so the provider group is reaped instead of orphaned. A second signal during cleanup now force-exits with 128+signal (130 or 143). Previously every later signal was swallowed.
+
+### Fixed
+- The `max_consecutive_tool_failures` default is 3 again. An unreleased change had set it to 0, which turned off the runaway tool-loop guard for every consumer that did not set it. `Some(0)` still disables the guard explicitly.
+
+### Security
+- Claude: per-run `mcp_servers` are written to a 0600 file in the run's artifact directory and passed as `--mcp-config <path>`. They were inline JSON in argv, where server env and headers (often credentials) are readable by other local users through `ps`. The file is removed when the run ends.
+
 ## 0.3.1 - 2026-09-03
 
 ### Added

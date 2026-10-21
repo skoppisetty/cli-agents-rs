@@ -115,10 +115,24 @@ let opts = RunOptions {
 |-------|---------|-------------|
 | `idle_timeout_ms` | 300,000 (5 min) | Time without any event before the run is cancelled |
 | `total_timeout_ms` | None (unlimited) | Absolute time limit for the entire run |
-| `max_consecutive_tool_failures` | 3 | Number of consecutive tool failures before aborting |
+| `max_consecutive_tool_failures` | 3 | Number of consecutive tool failures before aborting; `0` disables the limit |
 | `max_output_bytes` | 10 MB | Per-line stdout retention cap — an oversized line is dropped (surfaced as a warning event) and the run continues; cumulative throughput is unbounded by design |
 
 When a timeout fires or the failure limit is reached, the cancellation token is triggered and the process group is killed.
+
+## Sandboxed embedders
+
+Adapters may generate prompt and configuration files that the provider process must read. Set `artifact_dir` to a directory inside the provider's filesystem capability boundary:
+
+```rust
+let opts = RunOptions {
+    task: "Analyze this project.".into(),
+    artifact_dir: Some("/private/tmp/my-app/provider-runtime".into()),
+    ..Default::default()
+};
+```
+
+The directory must already exist. When it is supplied, generated artifacts never fall back to the ambient operating-system temp directory. This covers Claude's spilled prompt and MCP config files and Codex's instruction file and per-run profile (which carries MCP `env` and HTTP headers). Codex resolves profiles by name from `CODEX_HOME`, so the provider home receives only a symlink to the profile in `artifact_dir`; the provider must be able to read both.
 
 ## Permission bypass
 

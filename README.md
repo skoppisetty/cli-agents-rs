@@ -232,6 +232,11 @@ config as JSON and receive `StreamEvent`s back via Tauri events.
 See [`tauri-example/`](tauri-example/) for a
 complete Tauri integration with streaming and cancellation.
 
+Sandboxed embedders should set `clear_env: true`, supply a minimal `env`
+allowlist, and set `artifact_dir` to a writable directory inside the sandbox.
+This prevents parent-process secrets from entering the CLI and keeps generated
+prompt/configuration files inside the same capability boundary.
+
 ### Dev tools and CI
 
 Build custom coding agents, review bots, or CI automation that piggyback on
@@ -256,6 +261,17 @@ on availability or capability.
 | `Raw` | Provider-specific event (escape hatch) |
 
 ## CLI binary
+
+For embedding processes, `cli-agents --json --config-stdin` reads one complete
+[`RunOptions`](src/types.rs) JSON object from stdin and passes it unchanged to
+the same `run()` library used by native applications. This includes MCP servers,
+provider-specific options, session resume, environment and execution limits.
+Use a pipe so prompts and credentials do not appear in command-line arguments.
+Close stdin after the JSON object. This mode cannot be mixed with task or runtime
+flags (`--cli`, `--model`, `--system`, `--append-system-prompt`, `--cwd`,
+`--skip-permissions`, or `--discover`). Invalid configuration exits with code 2;
+JSON errors do not echo submitted values. `--json` retains the normal event stream.
+
 
 ```bash
 # Summarize a project (auto-discovers installed CLI)
@@ -296,3 +312,25 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 ## License
 
 MIT
+
+### Codex embedding configuration
+
+Codex MCP and system-instruction customization requires named profile **files**
+(`$CODEX_HOME/<name>.config.toml`), verified with Codex CLI **0.162.1**. Older
+CLIs supporting only `[profiles.name]` tables are unsupported for this mode;
+profile loading failures are surfaced rather than falling back to missing tools.
+
+The adapter keeps `.cli-agents-runtime` inside the explicit child `CODEX_HOME`
+(or child `HOME/.codex`). Its stable links retain owner auth/session locations,
+including absolute rollout paths used by Codex SQLite state. It never rewrites
+the owner's `config.toml` or authentication files. Each invocation gets an
+independent profile (0600) containing its configuration, including stdio
+environment variables and HTTP headers. The profile file itself is written under
+`artifact_dir` (or the OS temp directory when none is set); the runtime home
+holds only the `<name>.config.toml` symlink Codex resolves for `--profile`, so
+credentials never land in the provider home. Credentials are not command-line
+arguments. Only the profile, its link and instruction artifacts are removed
+after a turn; the runtime home must remain while sessions may be resumed.
+Sandbox callers must grant read access to `artifact_dir` and to their own
+persistent Codex home, and provide that home explicitly. The opt-in app-server
+transport sends the same snapshot over JSON-RPC and writes no profile file.

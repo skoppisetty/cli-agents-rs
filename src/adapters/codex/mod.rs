@@ -1,3 +1,4 @@
+pub mod app_server;
 mod parse;
 
 use crate::DEFAULT_MAX_OUTPUT_BYTES;
@@ -8,6 +9,7 @@ use crate::events::StreamEvent;
 use crate::types::{CliName, RunOptions, RunResult};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -30,13 +32,15 @@ impl CliAdapter for CodexAdapter {
             None => discover_binary(CliName::Codex).await.ok_or(Error::NoCli)?,
         };
 
-        // Write temp config if MCP servers or system_prompt_file are set.
-        // Hold the TempDir so it lives until the child process exits.
-        let (config_env, _tmp_dir) = write_configs(opts).await?;
-
-        let args = build_args(opts);
+        // Keep only per-invocation configuration temporary. Session/auth paths
+        // must keep their original CODEX_HOME for SQLite rollout references.
+        let config = write_configs(opts).await?;
+        let mut args = config.args.clone();
+        args.extend(build_args(opts));
         let mut extra_env = opts.env.clone().unwrap_or_default();
-        extra_env.extend(config_env);
+        if let Some(home) = &config.home {
+            extra_env.insert("CODEX_HOME".into(), home.to_string_lossy().into_owned());
+        }
         let max_bytes = opts.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
 
         let mut state = parse::ParseState::default();
@@ -62,6 +66,7 @@ impl CliAdapter for CodexAdapter {
             crate::adapters::SpawnOutcome::Cancelled => Ok(RunResult {
                 success: false,
                 text: Some("Cancelled.".into()),
+                session_id: state.session_id,
                 ..Default::default()
             }),
             crate::adapters::SpawnOutcome::Done {
@@ -94,96 +99,73 @@ impl CliAdapter for CodexAdapter {
 }
 
 fn build_args(opts: &RunOptions) -> Vec<String> {
-    let mut args = vec!["exec".into()];
-
-    // Resume a previous session if requested
-    if let Some(session_id) = &opts.resume_session_id {
-        args.push("resume".into());
-        args.push(session_id.clone());
-    }
-
-    args.push(opts.task.clone());
-    args.push("--json".into());
-
-    if let Some(model) = &opts.model {
-        args.push("--model".into());
-        args.push(model.clone());
-    }
-
+    // These are root CLI options, not `exec resume` options. Putting them after
+    // `resume` rejects otherwise valid continuation requests in current Codex.
+    let mut args = Vec::new();
     if let Some(cwd) = &opts.cwd {
-        args.push("-C".into());
-        args.push(cwd.clone());
+        args.extend(["-C".into(), cwd.clone()]);
     }
-
     let codex_opts = opts.providers.as_ref().and_then(|p| p.codex.as_ref());
-
     if let Some(co) = codex_opts {
         if let Some(policy) = &co.approval_policy {
             match policy.as_str() {
-                "full-auto" => args.push("--full-auto".into()),
-                "suggest" | "auto-edit" => {
-                    // Default Codex behavior — no flag needed
+                // Native replacement for the removed --full-auto shorthand.
+                "full-auto" => {
+                    args.extend(["--ask-for-approval".into(), "on-request".into()]);
+                    if co.sandbox_mode.is_none() {
+                        args.extend(["--sandbox".into(), "workspace-write".into()]);
+                    }
                 }
-                other => {
-                    warn!(policy = other, "unknown Codex approval policy, ignoring");
-                }
+                "suggest" | "auto-edit" => {}
+                other => warn!(policy = other, "unknown Codex approval policy, ignoring"),
             }
         }
         if let Some(sandbox) = &co.sandbox_mode {
-            args.push("--sandbox".into());
-            args.push(sandbox.clone());
+            args.extend(["--sandbox".into(), sandbox.clone()]);
         }
         if let Some(dirs) = &co.additional_directories {
             for dir in dirs {
-                args.push("-C".into());
-                args.push(dir.clone());
+                args.extend(["--add-dir".into(), dir.clone()]);
             }
         }
+    }
+    args.push("exec".into());
+    if let Some(session_id) = &opts.resume_session_id {
+        args.extend(["resume".into(), session_id.clone()]);
+    }
+    args.push("--json".into());
+    if let Some(model) = &opts.model {
+        args.extend(["--model".into(), model.clone()]);
+    }
+    if let Some(co) = codex_opts {
         if let Some(images) = &co.images {
             for img in images {
-                args.push("--image".into());
-                args.push(img.clone());
+                args.extend(["--image".into(), img.clone()]);
             }
         }
         if let Some(schema) = &co.output_schema {
-            args.push("--output-schema".into());
-            args.push(schema.clone());
+            args.extend(["--output-schema".into(), schema.clone()]);
         }
     }
-
-    // Permission bypass for non-interactive use (opt-in).
-    // Skip if an explicit approval_policy is set — the two flags conflict.
     let has_policy = codex_opts
         .and_then(|c| c.approval_policy.as_deref())
         .is_some_and(|p| !p.is_empty());
     if opts.skip_permissions && !has_policy {
         args.push("--dangerously-bypass-approvals-and-sandbox".into());
     }
-
-    // Programmatic callers often set cwd to a non-git directory.
     if opts.skip_permissions {
         args.push("--skip-git-repo-check".into());
     }
-
-    // User-supplied flags last, so callers can override earlier defaults.
     if let Some(extra) = codex_opts.and_then(|c| c.extra_args.as_ref()) {
         args.extend(extra.iter().cloned());
     }
-
+    // Positional prompt must not become an option when the user starts with '-'.
+    args.extend(["--".into(), opts.task.clone()]);
     args
 }
 
-// ── Codex TOML config types ──
-
-#[derive(Serialize)]
-struct CodexConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instructions: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mcp_servers: Option<HashMap<String, CodexMcpServer>>,
-}
-
-#[derive(Serialize)]
+// Codex's named profile files preserve the durable home and keep secrets off argv.
+#[derive(Default, Serialize)]
 struct CodexMcpServer {
     #[serde(skip_serializing_if = "Option::is_none")]
     command: Option<String>,
@@ -194,69 +176,201 @@ struct CodexMcpServer {
     #[serde(skip_serializing_if = "Option::is_none")]
     cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_headers: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled_tools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disabled_tools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tool_timeout_sec: Option<u64>,
 }
 
-/// Write temporary Codex config files for MCP servers and system prompts.
-///
-/// Codex reads MCP configuration from `config.toml` and system prompts from
-/// an `instructions` field in the same file. We write a temporary config and
-/// point Codex to it via `CODEX_HOME`.
-///
-/// Returns the env vars to set and the temp dir handle (must be kept alive
-/// until the child process exits).
-async fn write_configs(
-    opts: &RunOptions,
-) -> Result<(HashMap<String, String>, Option<tempfile::TempDir>)> {
-    let has_mcp = opts.mcp_servers.as_ref().is_some_and(|s| !s.is_empty());
+#[derive(Default)]
+struct InvocationConfig {
+    home: Option<PathBuf>,
+    args: Vec<String>,
+    /// Complete snapshot: caller base config plus this invocation's overrides.
+    table: Option<toml::Table>,
+    profile: Option<ProfileLink>,
+    artifacts: Option<tempfile::TempDir>,
+}
+
+/// `--profile <name>` resolves `$CODEX_HOME/<name>.config.toml`. That path is
+/// only a symlink: the private file it names lives in the run's artifact
+/// directory, so MCP credentials never land in the provider home.
+struct ProfileLink {
+    link: PathBuf,
+}
+
+impl ProfileLink {
+    #[cfg(test)]
+    fn path(&self) -> &Path {
+        &self.link
+    }
+}
+
+impl Drop for ProfileLink {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.link);
+    }
+}
+
+/// Exec: snapshot plus a named profile file the CLI loads with `--profile`.
+async fn write_configs(opts: &RunOptions) -> Result<InvocationConfig> {
+    let mut config = snapshot_config(opts, false).await?;
+    if let (Some(table), Some(home)) = (&config.table, &config.home) {
+        let dir = match config.artifacts.take() {
+            Some(dir) => dir,
+            None => crate::artifacts::temp_dir(opts, "cli-agents-codex-")?,
+        };
+        let content = toml::to_string(table)
+            .map_err(|_| Error::Other("Cannot serialize Codex invocation configuration".into()))?;
+        let target = dir.path().join("profile.config.toml");
+        write_private(&target, content.as_bytes())?;
+        let name = dir
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| Error::Other("Invalid Codex profile filename".into()))?
+            .to_owned();
+        let link = home.join(format!("{name}.config.toml"));
+        symlink_file(&target, &link)?;
+        config.args = vec!["--profile".into(), name];
+        config.profile = Some(ProfileLink { link });
+        config.artifacts = Some(dir);
+    }
+    Ok(config)
+}
+
+// Every app-server operation, including config-free read-only inspection, must
+// open the same provider state database as configured prepare/run operations.
+// app-server takes the snapshot over JSON-RPC, so no profile file is written.
+async fn write_configs_for_app_server(opts: &RunOptions) -> Result<InvocationConfig> {
+    snapshot_config(opts, true).await
+}
+
+async fn snapshot_config(opts: &RunOptions, always_snapshot: bool) -> Result<InvocationConfig> {
     let system_prompt = resolve_system_prompt(opts).await?;
-
-    if !has_mcp && system_prompt.is_none() {
-        return Ok((HashMap::new(), None));
+    if !always_snapshot && opts.mcp_servers.is_none() && system_prompt.is_none() {
+        return Ok(InvocationConfig::default());
     }
-
-    let tmp_dir = crate::artifacts::temp_dir(opts, "cli-agents-codex-")?;
-    let codex_home = resolve_codex_home(opts);
-    if let Some(home) = &codex_home {
-        link_codex_home_contents(home, tmp_dir.path())?;
-    }
-
-    let config = CodexConfig {
-        instructions: system_prompt,
-        mcp_servers: opts.mcp_servers.as_ref().map(|servers| {
-            servers
-                .iter()
-                .map(|(name, s)| {
-                    (
-                        name.clone(),
-                        CodexMcpServer {
-                            command: s.command.clone(),
-                            args: s.args.clone(),
-                            env: s.env.clone(),
-                            cwd: s.cwd.clone(),
-                            tool_timeout_sec: s.timeout,
-                        },
-                    )
-                })
-                .collect()
-        }),
+    let home = resolve_codex_home(opts).ok_or_else(|| {
+        Error::Other("Codex configuration requires a persistent child CODEX_HOME or HOME".into())
+    })?;
+    std::fs::create_dir_all(&home).map_err(Error::Io)?;
+    let home = std::fs::canonicalize(home).map_err(Error::Io)?;
+    let runtime_home = prepare_runtime_home(&home)?;
+    let base_path = home.join("config.toml");
+    let mut table: toml::Table = if base_path.exists() {
+        toml::from_str(&std::fs::read_to_string(&base_path).map_err(Error::Io)?)
+            .map_err(|_| Error::Other("Invalid existing Codex configuration".into()))?
+    } else {
+        toml::Table::new()
     };
+    let mut config = InvocationConfig {
+        home: Some(runtime_home),
+        ..Default::default()
+    };
+    if let Some(prompt) = system_prompt {
+        let dir = crate::artifacts::temp_dir(opts, "cli-agents-codex-")?;
+        let path = dir.path().join("instructions.md");
+        tokio::fs::write(&path, prompt).await.map_err(Error::Io)?;
+        table.insert(
+            "model_instructions_file".into(),
+            toml::Value::String(path.to_string_lossy().into_owned()),
+        );
+        config.artifacts = Some(dir);
+    }
+    if let Some(servers) = &opts.mcp_servers {
+        let mut mcp = toml::Table::new();
+        for (name, server) in servers {
+            if matches!(server.transport_type, Some(crate::types::McpTransport::Sse)) {
+                return Err(Error::Other(
+                    "Codex requires streamable HTTP or stdio MCP transport".into(),
+                ));
+            }
+            let mapped = CodexMcpServer {
+                command: server.command.clone(),
+                args: server.args.clone(),
+                env: server.env.clone(),
+                cwd: server.cwd.clone(),
+                url: server.url.clone(),
+                http_headers: server.headers.clone(),
+                enabled_tools: server.include_tools.clone(),
+                disabled_tools: server.exclude_tools.clone(),
+                tool_timeout_sec: server.timeout,
+            };
+            mcp.insert(
+                name.clone(),
+                toml::Value::try_from(mapped)
+                    .map_err(|_| Error::Other("Cannot serialize Codex MCP configuration".into()))?,
+            );
+        }
+        table.insert("mcp_servers".into(), toml::Value::Table(mcp));
+    }
+    config.table = Some(table);
+    Ok(config)
+}
 
-    let existing_config = codex_home.as_ref().map(|h| h.join("config.toml"));
-    let config_table = merge_config(existing_config.as_deref(), config)?;
-    let toml_str = toml::to_string_pretty(&config_table)
-        .map_err(|e| Error::Other(format!("TOML serialization: {e}")))?;
-    let config_path = tmp_dir.path().join("config.toml");
-    tokio::fs::write(&config_path, toml_str)
-        .await
-        .map_err(Error::Io)?;
+fn write_private(path: &Path, content: &[u8]) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path).map_err(Error::Io)?;
+    file.write_all(content).map_err(Error::Io)
+}
 
-    let mut env = HashMap::new();
-    env.insert(
-        "CODEX_HOME".into(),
-        tmp_dir.path().to_string_lossy().into_owned(),
-    );
-    Ok((env, Some(tmp_dir)))
+fn symlink_file(target: &Path, link: &Path) -> Result<()> {
+    #[cfg(unix)]
+    let result = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let result = std::os::windows::fs::symlink_file(target, link);
+    result.map_err(Error::Io)
+}
+
+/// Stable paths are required: Codex records absolute rollout paths in SQLite.
+/// Only invocation profiles are temporary; owner transcripts/auth stay in place.
+fn prepare_runtime_home(owner: &Path) -> Result<PathBuf> {
+    const RUNTIME: &str = ".cli-agents-runtime";
+    for name in ["sessions", "archived_sessions"] {
+        std::fs::create_dir_all(owner.join(name)).map_err(Error::Io)?;
+    }
+    let runtime = owner.join(RUNTIME);
+    std::fs::create_dir_all(&runtime).map_err(Error::Io)?;
+    for entry in std::fs::read_dir(owner).map_err(Error::Io)? {
+        let entry = entry.map_err(Error::Io)?;
+        let name = entry.file_name();
+        // The runtime owns no base config. Every profile is a complete snapshot
+        // of caller config, so profile merging cannot restore removed MCP fields.
+        if name == "config.toml"
+            || name == RUNTIME
+            || name.to_string_lossy().ends_with(".config.toml")
+        {
+            continue;
+        }
+        let target = runtime.join(name);
+        if std::fs::symlink_metadata(&target).is_ok() {
+            continue;
+        }
+        #[cfg(unix)]
+        let result = std::os::unix::fs::symlink(entry.path(), &target);
+        #[cfg(windows)]
+        let result = if entry.path().is_dir() {
+            std::os::windows::fs::symlink_dir(entry.path(), &target)
+        } else {
+            std::os::windows::fs::symlink_file(entry.path(), &target)
+        };
+        if let Err(error) = result {
+            // Concurrent invocations may prepare the same owner home.
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(Error::Io(error));
+            }
+        }
+    }
+    Ok(runtime)
 }
 
 fn resolve_codex_home(opts: &RunOptions) -> Option<PathBuf> {
@@ -266,70 +380,12 @@ fn resolve_codex_home(opts: &RunOptions) -> Option<PathBuf> {
                 .map(|home| PathBuf::from(home).join(".codex"))
         })
     });
-    if configured.is_some() || opts.artifact_dir.is_some() {
+    if configured.is_some() || opts.artifact_dir.is_some() || opts.clear_env {
         return configured;
     }
-
     std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
-}
-
-/// Symlink top-level entries of `src` into `dst`, skipping `config.toml`
-/// (we write our own merged version). Symlinks avoid copying potentially
-/// large session/history directories on every run.
-fn link_codex_home_contents(src: &Path, dst: &Path) -> Result<()> {
-    if !src.exists() {
-        return Ok(());
-    }
-
-    for entry in std::fs::read_dir(src).map_err(Error::Io)? {
-        let entry = entry.map_err(Error::Io)?;
-        if entry.file_name() == "config.toml" {
-            continue;
-        }
-        let target = dst.join(entry.file_name());
-        symlink_entry(&entry.path(), &target)?;
-    }
-
-    Ok(())
-}
-
-#[cfg(unix)]
-fn symlink_entry(src: &Path, dst: &Path) -> Result<()> {
-    std::os::unix::fs::symlink(src, dst).map_err(Error::Io)
-}
-
-#[cfg(windows)]
-fn symlink_entry(src: &Path, dst: &Path) -> Result<()> {
-    if src.is_dir() {
-        std::os::windows::fs::symlink_dir(src, dst).map_err(Error::Io)
-    } else {
-        std::os::windows::fs::symlink_file(src, dst).map_err(Error::Io)
-    }
-}
-
-fn merge_config(existing_config: Option<&Path>, config: CodexConfig) -> Result<toml::Table> {
-    let mut table = match existing_config {
-        Some(path) if path.exists() => {
-            let existing = std::fs::read_to_string(path).map_err(Error::Io)?;
-            toml::from_str::<toml::Table>(&existing)
-                .map_err(|e| Error::Other(format!("TOML parse: {e}")))?
-        }
-        _ => toml::Table::new(),
-    };
-
-    if let Some(instructions) = config.instructions {
-        table.insert("instructions".into(), toml::Value::String(instructions));
-    }
-
-    if let Some(mcp_servers) = config.mcp_servers {
-        let value = toml::Value::try_from(mcp_servers)
-            .map_err(|e| Error::Other(format!("TOML conversion: {e}")))?;
-        table.insert("mcp_servers".into(), value);
-    }
-
-    Ok(table)
 }
 
 /// Resolve the effective system prompt: `system_prompt_file` takes precedence
@@ -412,7 +468,11 @@ mod tests {
             ..Default::default()
         };
         let args = build_args(&opts);
-        assert!(args.contains(&"--full-auto".to_string()));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--ask-for-approval", "on-request"])
+        );
+        assert!(!args.contains(&"--full-auto".to_string()));
         assert!(args.contains(&"--sandbox".to_string()));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"o3".to_string()));
@@ -433,7 +493,11 @@ mod tests {
             ..Default::default()
         };
         let args = build_args(&opts);
-        assert!(args.contains(&"--full-auto".to_string()));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--ask-for-approval", "on-request"])
+        );
+        assert!(!args.contains(&"--full-auto".to_string()));
         assert!(
             !args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
             "should not pass both --full-auto and --dangerously-bypass-approvals-and-sandbox"
@@ -441,231 +505,345 @@ mod tests {
         assert!(args.contains(&"--skip-git-repo-check".to_string()));
     }
 
-    #[tokio::test]
-    async fn write_configs_creates_mcp_config() {
-        let mut servers = HashMap::new();
-        servers.insert(
-            "test".into(),
-            crate::types::McpServer {
-                command: Some("test-server".into()),
-                args: Some(vec!["--flag".into()]),
-                ..Default::default()
-            },
-        );
-
+    #[test]
+    fn resume_keeps_root_scope_flags_before_exec_and_preserves_prompt() {
         let opts = RunOptions {
-            task: "hello".into(),
-            mcp_servers: Some(servers),
+            task: "--literal prompt".into(),
+            cwd: Some("/work".into()),
+            resume_session_id: Some("session".into()),
+            providers: Some(crate::types::ProviderOptions {
+                codex: Some(crate::types::CodexOptions {
+                    sandbox_mode: Some("workspace-write".into()),
+                    additional_directories: Some(vec!["/assets".into()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
             ..Default::default()
         };
+        let args = build_args(&opts);
+        let exec = args.iter().position(|arg| arg == "exec").unwrap();
+        assert_eq!(
+            &args[..exec],
+            [
+                "-C",
+                "/work",
+                "--sandbox",
+                "workspace-write",
+                "--add-dir",
+                "/assets"
+            ]
+        );
+        assert_eq!(
+            &args[exec..],
+            [
+                "exec",
+                "resume",
+                "session",
+                "--json",
+                "--",
+                "--literal prompt"
+            ]
+        );
+    }
 
-        let (env, tmp_dir) = write_configs(&opts).await.unwrap();
-        assert!(env.contains_key("CODEX_HOME"));
-        let tmp = tmp_dir.unwrap();
-
-        let config_path = tmp.path().join("config.toml");
-        let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains("[mcp_servers.test]"));
-        assert!(content.contains("test-server"));
+    fn scoped_options(home: &tempfile::TempDir) -> RunOptions {
+        RunOptions {
+            task: "hello".into(),
+            env: Some(HashMap::from([(
+                "CODEX_HOME".into(),
+                home.path().to_string_lossy().into_owned(),
+            )])),
+            ..Default::default()
+        }
     }
 
     #[tokio::test]
-    async fn write_configs_with_system_prompt() {
+    async fn profile_preserves_state_and_secret_transport_fields() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[mcp_servers.ambient]\ncommand = 'old'\n[mcp_servers.http]\ncommand = 'old-stdio'\n",
+        )
+        .unwrap();
+        std::fs::create_dir(home.path().join("sessions")).unwrap();
+        std::fs::write(home.path().join("sessions/rollout.jsonl"), "saved").unwrap();
         let opts = RunOptions {
-            task: "hello".into(),
-            system_prompt: Some("You are helpful.".into()),
-            ..Default::default()
+            mcp_servers: Some(HashMap::from([
+                (
+                    "stdio".into(),
+                    crate::types::McpServer {
+                        command: Some("tool".into()),
+                        env: Some(HashMap::from([("SECRET".into(), "private-value".into())])),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "http".into(),
+                    crate::types::McpServer {
+                        url: Some("https://mcp.test".into()),
+                        transport_type: Some(crate::types::McpTransport::Http),
+                        headers: Some(HashMap::from([(
+                            "Authorization".into(),
+                            "Bearer private-value".into(),
+                        )])),
+                        ..Default::default()
+                    },
+                ),
+            ])),
+            ..scoped_options(&home)
         };
-
-        let (env, tmp_dir) = write_configs(&opts).await.unwrap();
-        assert!(env.contains_key("CODEX_HOME"));
-        let tmp = tmp_dir.unwrap();
-
-        let config_path = tmp.path().join("config.toml");
-        let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains("instructions"));
-        assert!(content.contains("You are helpful."));
+        let config = write_configs(&opts).await.unwrap();
+        let profile_path = config.profile.as_ref().unwrap().path().to_path_buf();
+        let table: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&profile_path).unwrap()).unwrap();
+        assert_eq!(
+            table["mcp_servers"]["http"]["url"].as_str(),
+            Some("https://mcp.test")
+        );
+        assert_eq!(
+            table["mcp_servers"]["http"]["http_headers"]["Authorization"].as_str(),
+            Some("Bearer private-value")
+        );
+        assert_eq!(
+            table["mcp_servers"]["stdio"]["env"]["SECRET"].as_str(),
+            Some("private-value")
+        );
+        assert!(
+            table["mcp_servers"]
+                .as_table()
+                .unwrap()
+                .get("ambient")
+                .is_none()
+        );
+        assert!(
+            table["mcp_servers"]["http"]
+                .as_table()
+                .unwrap()
+                .get("command")
+                .is_none()
+        );
+        assert!(!config.args.join(" ").contains("private-value"));
+        assert_eq!(profile_path.parent(), config.home.as_deref());
+        assert!(!config.home.as_ref().unwrap().join("config.toml").exists());
+        assert_eq!(
+            std::fs::canonicalize(config.home.as_ref().unwrap().join("sessions")).unwrap(),
+            std::fs::canonicalize(home.path().join("sessions")).unwrap()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&profile_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        drop(config);
+        assert!(!profile_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("sessions/rollout.jsonl")).unwrap(),
+            "saved"
+        );
+        assert!(home.path().join("config.toml").exists());
     }
 
     #[tokio::test]
     async fn generated_config_uses_the_owned_artifact_directory() {
-        let artifact_dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let artifact_root = artifacts.path().canonicalize().unwrap();
         let opts = RunOptions {
-            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
+            artifact_dir: Some(artifact_root.to_string_lossy().into_owned()),
             system_prompt: Some("owned prompt".into()),
-            ..Default::default()
-        };
-
-        let (env, handle) = write_configs(&opts).await.unwrap();
-        let codex_home = std::path::PathBuf::from(env.get("CODEX_HOME").unwrap());
-
-        assert!(codex_home.starts_with(artifact_dir.path()));
-        drop(handle);
-    }
-
-    #[test]
-    fn owned_artifacts_never_import_the_ambient_codex_home() {
-        let artifact_dir = tempfile::tempdir().unwrap();
-        let opts = RunOptions {
-            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
-            ..Default::default()
-        };
-
-        assert!(resolve_codex_home(&opts).is_none());
-    }
-
-    #[test]
-    fn owned_artifacts_use_only_the_explicit_child_codex_home() {
-        let artifact_dir = tempfile::tempdir().unwrap();
-        let isolated_home = tempfile::tempdir().unwrap();
-        let opts = RunOptions {
-            artifact_dir: Some(artifact_dir.path().to_string_lossy().into_owned()),
-            env: Some(HashMap::from([(
-                "HOME".into(),
-                isolated_home.path().to_string_lossy().into_owned(),
+            mcp_servers: Some(HashMap::from([(
+                "http".into(),
+                crate::types::McpServer {
+                    url: Some("https://mcp.test".into()),
+                    transport_type: Some(crate::types::McpTransport::Http),
+                    headers: Some(HashMap::from([(
+                        "Authorization".into(),
+                        "Bearer owned-secret".into(),
+                    )])),
+                    ..Default::default()
+                },
             )])),
-            ..Default::default()
+            ..scoped_options(&home)
         };
-
-        assert_eq!(
-            resolve_codex_home(&opts),
-            Some(isolated_home.path().join(".codex"))
-        );
-    }
-
-    #[tokio::test]
-    async fn write_configs_noop_when_empty() {
-        let opts = RunOptions {
-            task: "hello".into(),
-            ..Default::default()
-        };
-
-        let (env, tmp_dir) = write_configs(&opts).await.unwrap();
-        assert!(env.is_empty());
-        assert!(tmp_dir.is_none());
-    }
-
-    #[test]
-    fn merge_config_preserves_existing_keys() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(
-            &path,
-            r#"model = "o3"
-
-[mcp_servers.preexisting]
-command = "old-server"
-
-[other_table]
-foo = "bar"
-"#,
-        )
-        .unwrap();
-
-        let mut servers = HashMap::new();
-        servers.insert(
-            "test".into(),
-            CodexMcpServer {
-                command: Some("test-server".into()),
-                args: None,
-                env: None,
-                cwd: None,
-                tool_timeout_sec: None,
-            },
-        );
-
-        let config = CodexConfig {
-            instructions: Some("hello".into()),
-            mcp_servers: Some(servers),
-        };
-
-        let merged = merge_config(Some(&path), config).unwrap();
-
-        assert_eq!(merged.get("model").and_then(|v| v.as_str()), Some("o3"));
-        assert!(merged.get("other_table").is_some());
-        assert_eq!(
-            merged.get("instructions").and_then(|v| v.as_str()),
-            Some("hello")
-        );
-        // mcp_servers replaced wholesale — pre-existing entries are dropped
-        // in favor of the caller-supplied set, which is the documented behavior.
-        let mcp = merged
-            .get("mcp_servers")
-            .and_then(|v| v.as_table())
-            .unwrap();
-        assert!(mcp.contains_key("test"));
-        assert!(!mcp.contains_key("preexisting"));
-    }
-
-    #[test]
-    fn merge_config_no_existing_file() {
-        let merged = merge_config(
-            None,
-            CodexConfig {
-                instructions: Some("hi".into()),
-                mcp_servers: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            merged.get("instructions").and_then(|v| v.as_str()),
-            Some("hi")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn link_codex_home_skips_config_and_symlinks_rest() {
-        let src = tempfile::tempdir().unwrap();
-        std::fs::write(src.path().join("config.toml"), "model = \"old\"").unwrap();
-        std::fs::write(src.path().join("auth.json"), "{\"token\":\"x\"}").unwrap();
-        std::fs::create_dir(src.path().join("sessions")).unwrap();
-        std::fs::write(src.path().join("sessions").join("a.jsonl"), "{}").unwrap();
-
-        let dst = tempfile::tempdir().unwrap();
-        link_codex_home_contents(src.path(), dst.path()).unwrap();
-
-        assert!(!dst.path().join("config.toml").exists());
-        let auth = dst.path().join("auth.json");
-        assert!(auth.exists());
-        assert!(auth.symlink_metadata().unwrap().file_type().is_symlink());
-        let sessions = dst.path().join("sessions");
+        let config = write_configs(&opts).await.unwrap();
+        let runtime_home = config.home.clone().unwrap();
+        let link = config.profile.as_ref().unwrap().path().to_path_buf();
+        assert_eq!(link.parent(), Some(runtime_home.as_path()));
         assert!(
-            sessions
-                .symlink_metadata()
+            std::fs::symlink_metadata(&link)
                 .unwrap()
                 .file_type()
                 .is_symlink()
         );
-        // Reading through the symlink reaches the original file.
-        let contents =
-            std::fs::read_to_string(dst.path().join("sessions").join("a.jsonl")).unwrap();
-        assert_eq!(contents, "{}");
+        let target = std::fs::read_link(&link).unwrap();
+        // Compare canonical forms: Windows spells the same path with and
+        // without the verbatim `\\?\` prefix.
+        assert!(
+            std::fs::canonicalize(&target)
+                .unwrap()
+                .starts_with(&artifact_root),
+            "{target:?}"
+        );
+        assert!(
+            std::fs::read_to_string(&target)
+                .unwrap()
+                .contains("Bearer owned-secret")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // The profile name Codex resolves is the link's stem.
+        let name = link
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .strip_suffix(".config.toml")
+            .unwrap()
+            .to_owned();
+        assert_eq!(config.args, ["--profile".to_string(), name]);
+        // No regular file anywhere under the provider home holds the credential.
+        let mut pending = vec![home.path().to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                } else if kind.is_file() {
+                    let bytes = std::fs::read(entry.path()).unwrap();
+                    assert!(!String::from_utf8_lossy(&bytes).contains("owned-secret"));
+                }
+            }
+        }
+        drop(config);
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(!target.exists());
     }
 
     #[tokio::test]
-    async fn write_configs_system_prompt_file_takes_precedence() {
-        let fixture = tempfile::tempdir().unwrap();
+    async fn concurrent_profiles_keep_one_stable_home_and_independent_configuration() {
+        let home = tempfile::tempdir().unwrap();
+        let first = RunOptions {
+            system_prompt: Some("first".into()),
+            ..scoped_options(&home)
+        };
+        let second = RunOptions {
+            system_prompt: Some("second".into()),
+            ..scoped_options(&home)
+        };
+        let (first, second) = tokio::join!(write_configs(&first), write_configs(&second));
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first.home, second.home);
+        assert_ne!(
+            first.profile.as_ref().unwrap().path(),
+            second.profile.as_ref().unwrap().path()
+        );
+        let second_path = second.profile.as_ref().unwrap().path().to_path_buf();
+        drop(first);
+        assert!(second_path.exists());
+        assert!(home.path().join("sessions").is_dir());
+        assert!(home.path().join("archived_sessions").is_dir());
+        assert!(
+            !second
+                .home
+                .as_ref()
+                .unwrap()
+                .join(".cli-agents-runtime")
+                .exists()
+        );
+    }
 
-        // Write a prompt file
-        let prompt_file = fixture.path().join("prompt.md");
-        std::fs::write(&prompt_file, "File prompt content").unwrap();
-
+    #[tokio::test]
+    async fn instruction_file_uses_owned_artifacts_and_file_precedence() {
+        let home = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let input = artifacts.path().join("input.md");
+        std::fs::write(&input, "file instructions").unwrap();
         let opts = RunOptions {
-            task: "hello".into(),
-            system_prompt: Some("Inline prompt".into()),
-            system_prompt_file: Some(prompt_file.to_string_lossy().into_owned()),
+            artifact_dir: Some(artifacts.path().to_string_lossy().into_owned()),
+            system_prompt: Some("inline ignored".into()),
+            system_prompt_file: Some(input.to_string_lossy().into_owned()),
+            ..scoped_options(&home)
+        };
+        let config = write_configs(&opts).await.unwrap();
+        let table: toml::Table = toml::from_str(
+            &std::fs::read_to_string(config.profile.as_ref().unwrap().path()).unwrap(),
+        )
+        .unwrap();
+        let path = PathBuf::from(table["model_instructions_file"].as_str().unwrap());
+        assert!(path.starts_with(artifacts.path()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "file instructions");
+        drop(config);
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn empty_configuration_creates_no_profile() {
+        let config = write_configs(&RunOptions::default()).await.unwrap();
+        assert!(config.args.is_empty());
+        assert!(config.profile.is_none());
+    }
+
+    #[tokio::test]
+    async fn app_server_empty_overrides_preserve_base_and_auth_without_changing_exec_home() {
+        let home = tempfile::tempdir().unwrap();
+        let base =
+            "model = 'fixture-model'\n[model_providers.fixture]\nbase_url = 'http://127.0.0.1:1'\n";
+        std::fs::write(home.path().join("config.toml"), base).unwrap();
+        std::fs::write(home.path().join("auth.json"), "fixture auth bytes").unwrap();
+        let opts = scoped_options(&home);
+        let ordinary = write_configs(&opts).await.unwrap();
+        assert!(ordinary.home.is_none()); // existing child env keeps owner HOME
+        assert!(ordinary.profile.is_none());
+        assert!(ordinary.args.is_empty());
+        assert!(!home.path().join(".cli-agents-runtime").exists());
+        let app_server = write_configs_for_app_server(&opts).await.unwrap();
+        let expected_home = home
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join(".cli-agents-runtime");
+        assert_eq!(app_server.home.as_ref(), Some(&expected_home));
+        assert!(app_server.profile.is_none());
+        assert!(app_server.args.is_empty());
+        let expected: toml::Table = toml::from_str(base).unwrap();
+        assert_eq!(app_server.table.as_ref(), Some(&expected));
+        assert_eq!(
+            std::fs::read_to_string(expected_home.join("auth.json")).unwrap(),
+            "fixture auth bytes"
+        );
+        assert!(!expected_home.join("config.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+            base
+        );
+    }
+
+    #[test]
+    fn owned_artifacts_never_import_ambient_home() {
+        let opts = RunOptions {
+            artifact_dir: Some("/isolated".into()),
             ..Default::default()
         };
-
-        let (env, tmp_dir) = write_configs(&opts).await.unwrap();
-        assert!(env.contains_key("CODEX_HOME"));
-        let tmp = tmp_dir.unwrap();
-
-        let config_path = tmp.path().join("config.toml");
-        let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains("File prompt content"));
-        assert!(!content.contains("Inline prompt"));
+        assert!(resolve_codex_home(&opts).is_none());
+        let opts = RunOptions {
+            clear_env: true,
+            ..Default::default()
+        };
+        assert!(resolve_codex_home(&opts).is_none());
     }
 
     #[test]
