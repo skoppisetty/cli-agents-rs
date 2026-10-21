@@ -684,7 +684,14 @@ mod tests {
                 .is_symlink()
         );
         let target = std::fs::read_link(&link).unwrap();
-        assert!(target.starts_with(&artifact_root), "{target:?}");
+        // Compare canonical forms: Windows spells the same path with and
+        // without the verbatim `\\?\` prefix.
+        assert!(
+            std::fs::canonicalize(&target)
+                .unwrap()
+                .starts_with(&artifact_root),
+            "{target:?}"
+        );
         assert!(
             std::fs::read_to_string(&target)
                 .unwrap()
